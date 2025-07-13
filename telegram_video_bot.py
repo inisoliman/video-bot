@@ -26,6 +26,9 @@ else:
 # Replace 'YOUR_CHANNEL_ID' with your new supergroup's chat_id
 CHANNEL_ID = '-1002674581978'
 
+# Global flag to coordinate fetching and polling
+FETCH_REQUESTED = False
+
 # Initialize database
 def init_db():
     try:
@@ -114,6 +117,7 @@ def fetch_old_videos():
             time.sleep(1)
         except Exception as e:
             print(f"Error fetching messages: {e}")
+            time.sleep(5) # Wait before breaking on error
             break
 
 # Handle commands
@@ -123,9 +127,14 @@ def start(message):
 
 @bot.message_handler(commands=['fetch'])
 def fetch_videos_command(message):
-    bot.reply_to(message, "Fetching videos, this may take time...")
-    fetch_old_videos()
-    bot.reply_to(message, "Videos fetched! Send a name to search or use /list.")
+    global FETCH_REQUESTED
+    if FETCH_REQUESTED:
+        bot.reply_to(message, "Fetch is already scheduled or in progress.")
+        return
+    
+    bot.reply_to(message, "Scheduled a fetch for old videos. The bot will temporarily stop and restart automatically.")
+    FETCH_REQUESTED = True
+    bot.stop_polling()
 
 @bot.message_handler(commands=['add_category'])
 def add_category(message):
@@ -203,5 +212,23 @@ def handle_new_video(message):
 # Initialize database and start
 if __name__ == "__main__":
     init_db()
-    print("The bot is running...")
-    bot.polling(none_stop=True)
+    
+    while True:
+        if FETCH_REQUESTED:
+            print("Fetch requested. Running fetch_old_videos()...")
+            try:
+                fetch_old_videos()
+                print("Fetching complete.")
+            except Exception as e:
+                print(f"An error occurred during fetch_old_videos: {e}")
+            finally:
+                FETCH_REQUESTED = False # Reset the flag
+
+        try:
+            print("The bot is running...")
+            # Use blocking polling. The loop will only continue if polling is stopped.
+            bot.polling(none_stop=False)
+        except Exception as e:
+            print(f"Bot polling error: {e}")
+            print("Restarting in 10 seconds...")
+            time.sleep(10)
