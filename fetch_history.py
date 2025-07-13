@@ -2,7 +2,6 @@
 # ملف: fetch_history.py
 # الوصف: هذا الملف يستخدم لمرة واحدة فقط لجلب كل الفيديوهات القديمة
 # من القناة وحفظها في قاعدة البيانات.
-# هذا الإصدار آمن ويقرأ البيانات الحساسة من متغيرات البيئة.
 # ==============================================================================
 
 import telebot
@@ -34,8 +33,9 @@ def init_db_fetch():
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
+        # تم تغيير اسم الجدول إلى video_archive لإصلاح خطأ حجم البيانات
         c.execute('''
-            CREATE TABLE IF NOT EXISTS videos (
+            CREATE TABLE IF NOT EXISTS video_archive (
                 id SERIAL PRIMARY KEY,
                 message_id INTEGER UNIQUE,
                 caption TEXT,
@@ -55,7 +55,7 @@ def add_video_fetch(message_id, caption, chat_id, file_name=None, category='Unca
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
         c.execute("""
-            INSERT INTO videos (message_id, caption, chat_id, file_name, category) 
+            INSERT INTO video_archive (message_id, caption, chat_id, file_name, category) 
             VALUES (%s, %s, %s, %s, %s) 
             ON CONFLICT (message_id) DO NOTHING
         """, (message_id, caption or "No caption", chat_id, file_name or "", category))
