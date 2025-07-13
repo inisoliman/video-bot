@@ -1,24 +1,24 @@
 # ==============================================================================
 # ملف: bot.py
 # الوصف: هذا هو البوت الرئيسي الذي يعمل بشكل دائم للرد على المستخدمين
-# وحفظ الفيديوهات الجديدة تلقائياً.
-# هذا الإصدار آمن ويقرأ البيانات الحساسة من متغيرات البيئة.
+# وحفظ الفيديوهات الجديدة تلقائياً، مع ميزات خاصة بالآدمن.
 # ==============================================================================
 
 import telebot
 import psycopg2
 import os
 import time
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from urllib.parse import urlparse
 
 # --- الإعدادات الأساسية (قراءة آمنة من متغيرات البيئة) ---
-# احصل على توكن البوت من متغيرات البيئة
 BOT_TOKEN = os.getenv('BOT_TOKEN')
+DATABASE_URL = os.getenv('DATABASE_URL')
+CHANNEL_ID = os.getenv('CHANNEL_ID')
+ADMIN_ID = os.getenv('ADMIN_ID') # معرف حساب الآدمن
+
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# احصل على رابط قاعدة البيانات من متغيرات البيئة (تضيفه Railway تلقائياً)
-DATABASE_URL = os.getenv('DATABASE_URL')
 DB_CONFIG = {}
 if DATABASE_URL:
     url = urlparse(DATABASE_URL)
@@ -30,8 +30,8 @@ if DATABASE_URL:
         'port': url.port
     }
 
-# احصل على معرف القناة من متغيرات البيئة
-CHANNEL_ID = os.getenv('CHANNEL_ID')
+# قاموس مؤقت لتخزين بيانات عملية التصنيف
+admin_steps = {}
 
 # --- دوال قاعدة البيانات ---
 
@@ -102,13 +102,38 @@ def search_videos(query):
         print(f"Search videos error: {e}")
         return []
 
+def update_video_category(message_id, category):
+    """تحديث تصنيف فيديو معين."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        c = conn.cursor()
+        c.execute("UPDATE videos SET category = %s WHERE message_id = %s", (category, message_id))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Update category error: {e}")
+        return False
+
+# --- إعداد القائمة الرئيسية ---
+def main_menu():
+    """إنشاء القائمة الرئيسية للبوت."""
+    markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+    list_button = KeyboardButton('🎬 عرض كل الفيديوهات')
+    markup.add(list_button)
+    return markup
+
 # --- أوامر البوت ---
 
 @bot.message_handler(commands=['start'])
 def start(message):
-    bot.reply_to(message, "أهلاً بك! أرسل اسم فيلم للبحث، أو استخدم /list لعرض الفئات.")
+    bot.reply_to(message, "أهلاً بك في بوت البحث عن الفيديوهات!", reply_markup=main_menu())
 
-@bot.message_handler(commands=['list'])
+@bot.message_handler(func=lambda message: message.text == '🎬 عرض كل الفيديوهات')
+def handle_list_videos_button(message):
+    """معالجة الضغط على زر عرض الفيديوهات."""
+    list_videos(message)
+
 def list_videos(message):
     """عرض جميع الفئات المتاحة كأزرار."""
     all_videos = get_videos()
@@ -121,12 +146,55 @@ def list_videos(message):
         bot.reply_to(message, "لا توجد فئات محددة.")
         return
 
-    keyboard = InlineKeyboardMarkup()
-    for cat in categories:
-        keyboard.add(InlineKeyboardButton(text=cat, callback_data=f"cat_{cat}"))
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    buttons = [InlineKeyboardButton(text=cat, callback_data=f"cat_{cat}") for cat in categories]
+    keyboard.add(*buttons)
     bot.reply_to(message, "اختر فئة لعرض فيديوهاتها:", reply_markup=keyboard)
 
-# --- معالجات الرسائل ---
+# --- أوامر الآدمن ---
+
+@bot.message_handler(commands=['add_category'])
+def add_category_start(message):
+    """بدء عملية إضافة تصنيف جديد (للآدمن فقط)."""
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "هذا الأمر مخصص لصاحب البوت فقط.")
+        return
+    
+    msg = bot.send_message(message.chat.id, "من فضلك، قم بإعادة توجيه (Forward) الفيديو الذي تريد تصنيفه.")
+    bot.register_next_step_handler(msg, process_forwarded_video)
+
+def process_forwarded_video(message):
+    """معالجة الفيديو المعاد توجيهه."""
+    if not message.forward_from_message_id:
+        bot.send_message(message.chat.id, "خطأ: يرجى إعادة توجيه رسالة الفيديو الأصلية من القناة.")
+        return
+
+    # استخراج معرف الرسالة الأصلي من القناة
+    original_message_id = message.forward_from_message_id
+    admin_steps[message.chat.id] = {'video_message_id': original_message_id}
+    
+    msg = bot.send_message(message.chat.id, "ممتاز. الآن أرسل اسم التصنيف الجديد لهذا الفيديو.")
+    bot.register_next_step_handler(msg, process_category_name)
+
+def process_category_name(message):
+    """معالجة اسم التصنيف وتحديث قاعدة البيانات."""
+    category_name = message.text.strip()
+    video_message_id = admin_steps.get(message.chat.id, {}).get('video_message_id')
+
+    if not video_message_id:
+        bot.send_message(message.chat.id, "حدث خطأ ما، يرجى المحاولة مرة أخرى باستخدام /add_category.")
+        return
+
+    if update_video_category(video_message_id, category_name):
+        bot.send_message(message.chat.id, f"✅ تم تحديث تصنيف الفيديو بنجاح إلى '{category_name}'.")
+    else:
+        bot.send_message(message.chat.id, "حدث خطأ أثناء تحديث قاعدة البيانات.")
+    
+    # تنظيف الخطوات
+    if message.chat.id in admin_steps:
+        del admin_steps[message.chat.id]
+
+# --- معالجات الرسائل العامة ---
 
 @bot.message_handler(content_types=['text'])
 def handle_text_search(message):
@@ -181,11 +249,9 @@ def callback_query(call):
             bot.answer_callback_query(call.id, f"لا توجد فيديوهات في فئة '{category}'.")
             return
 
-        keyboard = InlineKeyboardMarkup()
-        for video in videos_in_category[:25]:
-            message_id, caption, chat_id, file_name, _ = video
-            title = caption or file_name or "فيديو بدون عنوان"
-            keyboard.add(InlineKeyboardButton(text=title[:50], callback_data=f"video_{message_id}_{chat_id}"))
+        keyboard = InlineKeyboardMarkup(row_width=1)
+        buttons = [InlineKeyboardButton(text=(v[1] or v[3] or "فيديو بدون عنوان")[:50], callback_data=f"video_{v[0]}_{v[2]}") for v in videos_in_category[:25]]
+        keyboard.add(*buttons)
         
         try:
             bot.edit_message_text(f"الفيديوهات في فئة '{category}':", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
@@ -197,8 +263,8 @@ def callback_query(call):
 # --- نقطة انطلاق البوت ---
 
 if __name__ == "__main__":
-    if not all([BOT_TOKEN, DATABASE_URL, CHANNEL_ID]):
-        print("Error: Missing one or more environment variables (BOT_TOKEN, DATABASE_URL, CHANNEL_ID).")
+    if not all([BOT_TOKEN, DATABASE_URL, CHANNEL_ID, ADMIN_ID]):
+        print("Error: Missing one or more environment variables (BOT_TOKEN, DATABASE_URL, CHANNEL_ID, ADMIN_ID).")
     else:
         init_db()
         print("Bot is running...")
