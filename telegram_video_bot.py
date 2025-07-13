@@ -7,7 +7,8 @@ from urllib.parse import urlparse
 
 # Get BOT_TOKEN from environment
 BOT_TOKEN = os.getenv('BOT_TOKEN', '7770980051:AAHasDgP4Bb5uYDH0upTUjGeJtrY17THu9s')
-bot = telebot.TeleBot(BOT_TOKEN, skip_pending=True)
+# Removed skip_pending=True to prevent potential startup conflicts.
+bot = telebot.TeleBot(BOT_TOKEN)
 
 # Get DATABASE_URL from environment
 DATABASE_URL = os.getenv('DATABASE_URL', '')
@@ -26,8 +27,9 @@ else:
 # Replace 'YOUR_CHANNEL_ID' with your new supergroup's chat_id
 CHANNEL_ID = '-1002674581978'
 
-# Global flag to coordinate fetching and polling
+# Global flags to coordinate fetching and polling
 FETCH_REQUESTED = False
+LAST_FETCH_CHAT_ID = None
 
 # Initialize database
 def init_db():
@@ -101,6 +103,7 @@ def fetch_old_videos():
     offset = 0
     while True:
         try:
+            # This is a blocking call that can conflict if polling is also running.
             updates = bot.get_updates(offset=offset, limit=100, timeout=30)
             if not updates:
                 print("No more updates to fetch.")
@@ -117,8 +120,8 @@ def fetch_old_videos():
             time.sleep(1)
         except Exception as e:
             print(f"Error fetching messages: {e}")
-            time.sleep(5) # Wait before breaking on error
-            break
+            # Re-raise the exception so the main loop can handle it
+            raise e
 
 # Handle commands
 @bot.message_handler(commands=['start'])
@@ -127,13 +130,14 @@ def start(message):
 
 @bot.message_handler(commands=['fetch'])
 def fetch_videos_command(message):
-    global FETCH_REQUESTED
+    global FETCH_REQUESTED, LAST_FETCH_CHAT_ID
     if FETCH_REQUESTED:
         bot.reply_to(message, "Fetch is already scheduled or in progress.")
         return
     
-    bot.reply_to(message, "Scheduled a fetch for old videos. The bot will temporarily stop and restart automatically.")
+    bot.reply_to(message, "Scheduled a fetch for old videos. The bot will temporarily stop, fetch, and then restart automatically. I will notify you when it's complete.")
     FETCH_REQUESTED = True
+    LAST_FETCH_CHAT_ID = message.chat.id # Store chat_id to send completion message
     bot.stop_polling()
 
 @bot.message_handler(commands=['add_category'])
@@ -216,19 +220,38 @@ if __name__ == "__main__":
     while True:
         if FETCH_REQUESTED:
             print("Fetch requested. Running fetch_old_videos()...")
+            fetch_error = None
             try:
                 fetch_old_videos()
                 print("Fetching complete.")
             except Exception as e:
                 print(f"An error occurred during fetch_old_videos: {e}")
+                fetch_error = e
             finally:
-                FETCH_REQUESTED = False # Reset the flag
+                if LAST_FETCH_CHAT_ID:
+                    completion_message = "Fetching complete! You can now search for videos."
+                    if fetch_error:
+                        completion_message = f"Fetch process finished, but an error occurred."
+                    try:
+                        bot.send_message(LAST_FETCH_CHAT_ID, completion_message)
+                    except Exception as send_e:
+                        print(f"Failed to send fetch completion message: {send_e}")
+
+                FETCH_REQUESTED = False
+                LAST_FETCH_CHAT_ID = None
 
         try:
             print("The bot is running...")
-            # Use blocking polling. The loop will only continue if polling is stopped.
             bot.polling(none_stop=False)
         except Exception as e:
-            print(f"Bot polling error: {e}")
-            print("Restarting in 10 seconds...")
-            time.sleep(10)
+            if isinstance(e, telebot.apihelper.ApiTelegramException) and e.error_code == 409:
+                print("\n" + "!"*60)
+                print("!!! CRITICAL ERROR: 409 Conflict.")
+                print("!!! This means another instance of the bot is running with the same token.")
+                print("!!! Please ensure you have stopped ALL other running copies of this bot.")
+                print("!"*60 + "\n")
+            else:
+                print(f"Bot polling error: {e}")
+            
+            print("Restarting in 15 seconds...")
+            time.sleep(15)
