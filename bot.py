@@ -1,7 +1,7 @@
 # ==============================================================================
 # ملف: bot.py
-# الوصف: هذا هو البوت الرئيسي الذي يعمل بشكل دائم للرد على المستخدمين
-# وحفظ الفيديوهات الجديدة تلقائياً، مع ميزات خاصة بالآدمن.
+# الوصف: هذا هو الملف الوحيد للبوت. يقوم بالرد على المستخدمين، حفظ
+# الفيديوهات الجديدة، ويحتوي على أمر آمن لجلب الرسائل القديمة.
 # ==============================================================================
 
 import telebot
@@ -30,8 +30,9 @@ if DATABASE_URL:
         'port': url.port
     }
 
-# قاموس مؤقت لتخزين بيانات عملية التصنيف
+# متغيرات للتحكم في عمليات الآدمن
 admin_steps = {}
+FETCH_REQUESTED = False
 
 # --- دوال قاعدة البيانات ---
 
@@ -40,7 +41,6 @@ def init_db():
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
-        # تم تغيير اسم الجدول إلى video_archive لإصلاح خطأ حجم البيانات
         c.execute('''
             CREATE TABLE IF NOT EXISTS video_archive (
                 id SERIAL PRIMARY KEY,
@@ -193,6 +193,50 @@ def process_category_name(message):
     if message.chat.id in admin_steps:
         del admin_steps[message.chat.id]
 
+@bot.message_handler(commands=['admin_fetch_history'])
+def handle_fetch_command(message):
+    """بدء عملية جلب الرسائل القديمة بأمان (للآدمن فقط)."""
+    global FETCH_REQUESTED
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "هذا الأمر مخصص لصاحب البوت فقط.")
+        return
+    
+    bot.reply_to(message, "تم استلام طلب جلب الرسائل القديمة. سيتوقف البوت مؤقتاً عن الاستجابة حتى انتهاء العملية. سيتم إعلامك عند الانتهاء.")
+    FETCH_REQUESTED = True
+    bot.stop_polling()
+
+def fetch_all_videos_from_channel():
+    """جلب كل الفيديوهات من القناة وحفظها في قاعدة البيانات."""
+    print("Starting to fetch all video messages from the channel...")
+    offset = 0
+    videos_fetched = 0
+    try:
+        while True:
+            updates = bot.get_updates(offset=offset, limit=100, timeout=30)
+            if not updates:
+                print("No more messages to fetch.")
+                break
+
+            for update in updates:
+                offset = update.update_id + 1
+                message = update.message or update.channel_post
+                
+                if message and str(message.chat.id) == CHANNEL_ID and message.video:
+                    add_video(
+                        message_id=message.message_id,
+                        caption=message.caption,
+                        chat_id=message.chat.id,
+                        file_name=message.video.file_name if message.video else ""
+                    )
+                    videos_fetched += 1
+                    print(f"Fetched video #{videos_fetched} | Message ID: {message.message_id}")
+            time.sleep(2)
+        print(f"\nFetching complete! Total videos saved: {videos_fetched}")
+        bot.send_message(ADMIN_ID, f"✅ اكتملت عملية جلب الرسائل القديمة بنجاح. تم حفظ {videos_fetched} فيديو.")
+    except Exception as e:
+        print(f"An error occurred while fetching messages: {e}")
+        bot.send_message(ADMIN_ID, f"❌ حدث خطأ أثناء عملية جلب الرسائل: {e}")
+
 # --- معالجات الرسائل العامة ---
 
 @bot.message_handler(content_types=['text'])
@@ -266,10 +310,22 @@ if __name__ == "__main__":
         print("Error: Missing one or more environment variables (BOT_TOKEN, DATABASE_URL, CHANNEL_ID, ADMIN_ID).")
     else:
         init_db()
-        print("Bot is running...")
+        print("Bot is starting...")
         while True:
             try:
-                bot.polling(non_stop=True)
+                print("Bot is polling for messages...")
+                bot.polling(non_stop=False)
+
+                if FETCH_REQUESTED:
+                    print("Polling stopped to fetch history.")
+                    fetch_all_videos_from_channel()
+                    FETCH_REQUESTED = False
+                    print("History fetch complete. Restarting polling.")
+                else:
+                    # If polling stopped for any other reason, wait before restarting
+                    time.sleep(5)
+
             except Exception as e:
-                print(f"Bot polling error: {e}. Restarting in 15 seconds...")
+                print(f"An error occurred in the main loop: {e}")
+                print("Restarting in 15 seconds...")
                 time.sleep(15)
