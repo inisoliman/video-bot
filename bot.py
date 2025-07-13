@@ -40,8 +40,9 @@ def init_db():
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
+        # تم تغيير اسم الجدول إلى video_archive لإصلاح خطأ حجم البيانات
         c.execute('''
-            CREATE TABLE IF NOT EXISTS videos (
+            CREATE TABLE IF NOT EXISTS video_archive (
                 id SERIAL PRIMARY KEY,
                 message_id INTEGER UNIQUE,
                 caption TEXT,
@@ -62,7 +63,7 @@ def add_video(message_id, caption, chat_id, file_name=None, category='Uncategori
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
         c.execute("""
-            INSERT INTO videos (message_id, caption, chat_id, file_name, category) 
+            INSERT INTO video_archive (message_id, caption, chat_id, file_name, category) 
             VALUES (%s, %s, %s, %s, %s) 
             ON CONFLICT (message_id) DO NOTHING
         """, (message_id, caption or "No caption", chat_id, file_name or "", category))
@@ -77,9 +78,9 @@ def get_videos(category=None):
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
         if category:
-            c.execute("SELECT message_id, caption, chat_id, file_name, category FROM videos WHERE category = %s ORDER BY id", (category,))
+            c.execute("SELECT message_id, caption, chat_id, file_name, category FROM video_archive WHERE category = %s ORDER BY id", (category,))
         else:
-            c.execute("SELECT message_id, caption, chat_id, file_name, category FROM videos ORDER BY id")
+            c.execute("SELECT message_id, caption, chat_id, file_name, category FROM video_archive ORDER BY id")
         videos = c.fetchall()
         conn.close()
         return videos
@@ -93,7 +94,7 @@ def search_videos(query):
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
         search_query = '%' + query + '%'
-        c.execute("SELECT message_id, caption, chat_id, file_name, category FROM videos WHERE caption ILIKE %s OR file_name ILIKE %s ORDER BY id",
+        c.execute("SELECT message_id, caption, chat_id, file_name, category FROM video_archive WHERE caption ILIKE %s OR file_name ILIKE %s ORDER BY id",
                   (search_query, search_query))
         results = c.fetchall()
         conn.close()
@@ -107,7 +108,7 @@ def update_video_category(message_id, category):
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
-        c.execute("UPDATE videos SET category = %s WHERE message_id = %s", (category, message_id))
+        c.execute("UPDATE video_archive SET category = %s WHERE message_id = %s", (category, message_id))
         conn.commit()
         conn.close()
         return True
@@ -169,7 +170,6 @@ def process_forwarded_video(message):
         bot.send_message(message.chat.id, "خطأ: يرجى إعادة توجيه رسالة الفيديو الأصلية من القناة.")
         return
 
-    # استخراج معرف الرسالة الأصلي من القناة
     original_message_id = message.forward_from_message_id
     admin_steps[message.chat.id] = {'video_message_id': original_message_id}
     
@@ -190,7 +190,6 @@ def process_category_name(message):
     else:
         bot.send_message(message.chat.id, "حدث خطأ أثناء تحديث قاعدة البيانات.")
     
-    # تنظيف الخطوات
     if message.chat.id in admin_steps:
         del admin_steps[message.chat.id]
 
