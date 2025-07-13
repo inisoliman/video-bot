@@ -34,7 +34,7 @@ if DATABASE_URL:
         'port': url.port
     }
 
-# قاموس مؤقت لتخزين بيانات عملية التصنيف اليدوي
+# قاموس مؤقت لتخزين بيانات عمليات الآدمن
 admin_steps = {}
 
 # --- دوال قاعدة البيانات ---
@@ -115,7 +115,7 @@ def search_videos(query):
         return []
 
 def update_video_category(message_id, category):
-    """تحديث تصنيف فيديو معين (للتصنيف اليدوي)."""
+    """تحديث تصنيف فيديو معين."""
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
@@ -157,6 +157,22 @@ def get_active_category():
         print(f"Get active category error: {e}")
         return 'Uncategorized'
 
+def rename_category_in_db(old_name, new_name):
+    """إعادة تسمية أو نقل جماعي لتصنيف."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        c = conn.cursor()
+        # تحديث جدول الفيديوهات
+        c.execute("UPDATE video_archive SET category = %s WHERE category = %s", (new_name, old_name))
+        # التحقق مما إذا كان التصنيف النشط هو الذي يتم إعادة تسميته
+        c.execute("UPDATE bot_settings SET setting_value = %s WHERE setting_key = 'active_category' AND setting_value = %s", (new_name, old_name))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Rename category error: {e}")
+        return False
+
 # --- إعداد القائمة الرئيسية ---
 def main_menu():
     """إنشاء القائمة الرئيسية للبوت."""
@@ -195,17 +211,63 @@ def list_videos(message):
 
 # --- أوامر الآدمن ---
 
+@bot.message_handler(commands=['help_admin'])
+def help_admin(message):
+    """إرسال قائمة أوامر الإدارة للآدمن."""
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "هذا الأمر مخصص لصاحب البوت فقط.")
+        return
+
+    help_text = """
+*قائمة أوامر الإدارة (خاصة بصاحب البوت فقط)*
+
+هذه هي الأوامر التي يمكنك استخدامها للتحكم الكامل في تصنيفات وفيديوهات البوت.
+
+---
+
+*🗂️ إدارة التصنيفات*
+
+*1. تعيين التصنيف النشط*
+• *الأمر:* `/set_category <اسم التصنيف>`
+• *الوصف:* يجعل أي فيديو جديد يندرج تلقائياً تحت هذا التصنيف.
+
+*2. معرفة التصنيف النشط*
+• *الأمر:* `/current_category`
+
+*3. نقل جماعي / إعادة تسمية تصنيف*
+• *الأمر:* `/bulk_move` أو `/rename_category`
+• *الوصف:* ينقل جميع الفيديوهات من تصنيف إلى آخر.
+
+---
+
+*🎬 إدارة الفيديوهات الفردية*
+
+*4. نقل فيديو فردي إلى تصنيف آخر*
+• *الأمر:* `/move_video`
+
+*5. تصنيف فيديو بشكل يدوي*
+• *الأمر:* `/add_category`
+
+---
+
+*ℹ️ المساعدة*
+
+*6. عرض قائمة الأوامر هذه*
+• *الأمر:* `/help_admin`
+    """
+    bot.send_message(message.chat.id, help_text, parse_mode='Markdown')
+
+
 @bot.message_handler(commands=['set_category'])
 def handle_set_category(message):
     """أمر للآدمن لتعيين التصنيف النشط للفيديوهات الجديدة."""
     if str(message.from_user.id) != ADMIN_ID:
-        bot.reply_to(message, "هذا الأمر مخصص لصاحب البوت فقط.")
         return
     
     try:
         category_name = message.text.split(maxsplit=1)[1].strip()
         if set_active_category(category_name):
-            bot.reply_to(message, f"✅ تم تعيين التصنيف النشط بنجاح. أي فيديو جديد سيتم إضافته تحت فئة '{category_name}'.")
+            bot.reply_to(message, f"✅ تم تعيين التصنيف النشط بنجاح إلى '{category_name}'.")
         else:
             bot.reply_to(message, "حدث خطأ أثناء تعيين التصنيف.")
     except IndexError:
@@ -215,7 +277,6 @@ def handle_set_category(message):
 def handle_current_category(message):
     """أمر للآدمن لمعرفة التصنيف النشط حالياً."""
     if str(message.from_user.id) != ADMIN_ID:
-        bot.reply_to(message, "هذا الأمر مخصص لصاحب البوت فقط.")
         return
     
     active_category = get_active_category()
@@ -225,7 +286,6 @@ def handle_current_category(message):
 def add_category_start(message):
     """بدء عملية التصنيف اليدوي لفيديو معين (للآدمن فقط)."""
     if str(message.from_user.id) != ADMIN_ID:
-        bot.reply_to(message, "هذا الأمر مخصص لصاحب البوت فقط.")
         return
     
     msg = bot.send_message(message.chat.id, "من فضلك، قم بإعادة توجيه (Forward) الفيديو الذي تريد تصنيفه يدوياً.")
@@ -249,11 +309,82 @@ def process_category_name(message):
     video_message_id = admin_steps.get(message.chat.id, {}).get('video_message_id')
 
     if not video_message_id:
-        bot.send_message(message.chat.id, "حدث خطأ ما، يرجى المحاولة مرة أخرى باستخدام /add_category.")
+        bot.send_message(message.chat.id, "حدث خطأ ما، يرجى المحاولة مرة أخرى.")
         return
 
     if update_video_category(video_message_id, category_name):
         bot.send_message(message.chat.id, f"✅ تم تحديث تصنيف الفيديو المحدد بنجاح إلى '{category_name}'.")
+    else:
+        bot.send_message(message.chat.id, "حدث خطأ أثناء تحديث قاعدة البيانات.")
+    
+    if message.chat.id in admin_steps:
+        del admin_steps[message.chat.id]
+
+@bot.message_handler(commands=['rename_category', 'bulk_move'])
+def rename_category_start(message):
+    """بدء عملية إعادة تسمية أو النقل الجماعي للتصنيف (للآدمن فقط)."""
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+
+    msg = bot.send_message(message.chat.id, "من فضلك, أرسل اسم التصنيف المصدر (الذي تريد نقله أو تغيير اسمه).")
+    bot.register_next_step_handler(msg, process_old_category_name)
+
+def process_old_category_name(message):
+    """معالجة اسم التصنيف القديم وطلب الاسم الجديد."""
+    old_name = message.text.strip()
+    admin_steps[message.chat.id] = {'old_category_name': old_name}
+    msg = bot.send_message(message.chat.id, f"حسناً، سيتم نقل/تغيير اسم التصنيف '{old_name}'.\nالآن أرسل اسم التصنيف الهدف (الجديد).")
+    bot.register_next_step_handler(msg, process_new_category_name)
+
+def process_new_category_name(message):
+    """معالجة اسم التصنيف الجديد وتنفيذ التحديث."""
+    new_name = message.text.strip()
+    old_name = admin_steps.get(message.chat.id, {}).get('old_category_name')
+
+    if not old_name:
+        bot.send_message(message.chat.id, "حدث خطأ ما، يرجى المحاولة مرة أخرى.")
+        return
+
+    if rename_category_in_db(old_name, new_name):
+        bot.send_message(message.chat.id, f"✅ تم تغيير اسم التصنيف بنجاح من '{old_name}' إلى '{new_name}'.")
+    else:
+        bot.send_message(message.chat.id, "حدث خطأ أثناء تحديث قاعدة البيانات.")
+
+    if message.chat.id in admin_steps:
+        del admin_steps[message.chat.id]
+
+@bot.message_handler(commands=['move_video'])
+def move_video_start(message):
+    """بدء عملية نقل فيديو فردي إلى تصنيف آخر (للآدمن فقط)."""
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+
+    msg = bot.send_message(message.chat.id, "من فضلك، قم بإعادة توجيه (Forward) الفيديو الذي تريد نقل تصنيفه.")
+    bot.register_next_step_handler(msg, process_video_to_move)
+
+def process_video_to_move(message):
+    """معالجة الفيديو المعاد توجيهه لعملية النقل."""
+    if not message.forward_from_message_id:
+        bot.send_message(message.chat.id, "خطأ: يرجى إعادة توجيه رسالة الفيديو الأصلية من القناة.")
+        return
+
+    original_message_id = message.forward_from_message_id
+    admin_steps[message.chat.id] = {'video_to_move_id': original_message_id}
+    
+    msg = bot.send_message(message.chat.id, "ممتاز. الآن أرسل اسم التصنيف الجديد الذي تريد نقل الفيديو إليه.")
+    bot.register_next_step_handler(msg, process_new_category_for_move)
+
+def process_new_category_for_move(message):
+    """معالجة اسم التصنيف الجديد وتنفيذ نقل الفيديو."""
+    new_category_name = message.text.strip()
+    video_message_id = admin_steps.get(message.chat.id, {}).get('video_to_move_id')
+
+    if not video_message_id:
+        bot.send_message(message.chat.id, "حدث خطأ ما، يرجى المحاولة مرة أخرى.")
+        return
+
+    if update_video_category(video_message_id, new_category_name):
+        bot.send_message(message.chat.id, f"✅ تم نقل الفيديو بنجاح إلى تصنيف '{new_category_name}'.")
     else:
         bot.send_message(message.chat.id, "حدث خطأ أثناء تحديث قاعدة البيانات.")
     
