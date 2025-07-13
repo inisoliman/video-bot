@@ -1,6 +1,6 @@
 # ==============================================================================
 # ملف: bot.py
-# الوصف: الإصدار النهائي مع نظام التصنيف النشط وميزات خاصة بالآدمن.
+# الوصف: الإصدار النهائي مع نظام التصنيف النشط والبحث الذكي.
 # ==============================================================================
 
 import telebot
@@ -116,18 +116,33 @@ def get_videos(category=None, page=0):
         return [], 0
 
 def search_videos(query, page=0):
-    """البحث عن فيديوهات في قاعدة البيانات مع نظام الصفحات."""
+    """البحث عن فيديوهات في قاعدة البيانات مع تطبيع الحروف العربية (البحث الذكي)."""
     offset = page * VIDEOS_PER_PAGE
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
-        search_param = '%' + query + '%'
         
-        count_query = "SELECT COUNT(*) FROM video_archive WHERE caption ILIKE %s OR file_name ILIKE %s"
+        search_param = '%' + query + '%'
+
+        # دالة مساعدة لإنشاء تعبير التطبيع في SQL
+        def normalize_sql(column_name):
+            step1 = f"REPLACE({column_name}, 'أ', 'ا')"
+            step2 = f"REPLACE({step1}, 'إ', 'ا')"
+            step3 = f"REPLACE({step2}, 'آ', 'ا')"
+            step4 = f"REPLACE({step3}, 'ة', 'ه')"
+            step5 = f"REPLACE({step4}, 'ى', 'ي')"
+            return step5
+
+        normalized_caption = normalize_sql("caption")
+        normalized_file_name = normalize_sql("file_name")
+        normalized_search_param = normalize_sql("%s")
+
+        # بناء استعلامات العد والبيانات النهائية
+        count_query = f"SELECT COUNT(*) FROM video_archive WHERE {normalized_caption} ILIKE {normalized_search_param} OR {normalized_file_name} ILIKE {normalized_search_param}"
         c.execute(count_query, (search_param, search_param))
         total_count = c.fetchone()[0]
 
-        data_query = "SELECT message_id, caption, chat_id, file_name, category FROM video_archive WHERE caption ILIKE %s OR file_name ILIKE %s ORDER BY id LIMIT %s OFFSET %s"
+        data_query = f"SELECT message_id, caption, chat_id, file_name, category FROM video_archive WHERE {normalized_caption} ILIKE {normalized_search_param} OR {normalized_file_name} ILIKE {normalized_search_param} ORDER BY id LIMIT %s OFFSET %s"
         c.execute(data_query, (search_param, search_param, VIDEOS_PER_PAGE, offset))
         results = c.fetchall()
         
@@ -210,7 +225,7 @@ def create_paginated_keyboard(items, total_items, page, prefix, query_or_cat):
         if page > 0:
             nav_buttons.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"{prefix}_{query_or_cat}_{page - 1}"))
         
-        nav_buttons.append(InlineKeyboardButton(f"صفحة {page + 1}/{total_pages}", callback_data="noop")) # No operation
+        nav_buttons.append(InlineKeyboardButton(f"صفحة {page + 1}/{total_pages}", callback_data="noop"))
 
         if page < total_pages - 1:
             nav_buttons.append(InlineKeyboardButton("التالي ➡️", callback_data=f"{prefix}_{query_or_cat}_{page + 1}"))
@@ -224,6 +239,13 @@ def create_paginated_keyboard(items, total_items, page, prefix, query_or_cat):
 @bot.message_handler(commands=['start'])
 def start(message):
     bot.reply_to(message, "أهلاً بك في بوت البحث عن الفيديوهات!", reply_markup=main_menu())
+
+def main_menu():
+    """إنشاء القائمة الرئيسية للبوت."""
+    markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+    list_button = KeyboardButton('🎬 عرض كل الفيديوهات')
+    markup.add(list_button)
+    return markup
 
 @bot.message_handler(func=lambda message: message.text == '🎬 عرض كل الفيديوهات')
 def handle_list_videos_button(message):
@@ -253,7 +275,6 @@ def help_admin(message):
     help_text = "قائمة أوامر الإدارة:\n/set_category <اسم>\n/current_category\n/rename_category\n/bulk_move\n/move_video\n/add_category"
     bot.send_message(message.chat.id, help_text)
 
-# (بقية أوامر الآدمن تبقى كما هي)
 @bot.message_handler(commands=['set_category', 'current_category', 'add_category', 'rename_category', 'bulk_move', 'move_video'])
 def admin_commands(message):
     if str(message.from_user.id) != ADMIN_ID:
@@ -282,7 +303,6 @@ def admin_commands(message):
         msg = bot.send_message(message.chat.id, "من فضلك, أرسل اسم التصنيف المصدر (الذي تريد نقله أو تغيير اسمه).")
         bot.register_next_step_handler(msg, process_old_category_name)
 
-# (دوال معالجة خطوات الآدمن تبقى كما هي)
 def process_forwarded_video(message):
     if not message.forward_from_message_id:
         bot.send_message(message.chat.id, "خطأ: يرجى إعادة توجيه الرسالة.")
