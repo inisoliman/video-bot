@@ -1,7 +1,6 @@
 # ==============================================================================
 # ملف: bot.py
-# الوصف: هذا هو الملف الوحيد للبوت. يقوم بالرد على المستخدمين، حفظ
-# الفيديوهات الجديدة، ويحتوي على أمر آمن لجلب الرسائل القديمة.
+# الوصف: الإصدار النهائي مع نظام التصنيف النشط وميزات خاصة بالآدمن.
 # ==============================================================================
 
 import telebot
@@ -17,6 +16,11 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 CHANNEL_ID = os.getenv('CHANNEL_ID')
 ADMIN_ID = os.getenv('ADMIN_ID') # معرف حساب الآدمن
 
+# التأكد من وجود المتغيرات الأساسية قبل تشغيل البوت
+if not all([BOT_TOKEN, DATABASE_URL, CHANNEL_ID, ADMIN_ID]):
+    print("FATAL ERROR: Missing one or more environment variables (BOT_TOKEN, DATABASE_URL, CHANNEL_ID, ADMIN_ID).")
+    exit()
+
 bot = telebot.TeleBot(BOT_TOKEN)
 
 DB_CONFIG = {}
@@ -30,17 +34,17 @@ if DATABASE_URL:
         'port': url.port
     }
 
-# متغيرات للتحكم في عمليات الآدمن
+# قاموس مؤقت لتخزين بيانات عملية التصنيف اليدوي
 admin_steps = {}
-FETCH_REQUESTED = False
 
 # --- دوال قاعدة البيانات ---
 
 def init_db():
-    """إنشاء جدول الفيديوهات إذا لم يكن موجوداً."""
+    """إنشاء الجداول اللازمة إذا لم تكن موجودة."""
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
+        # جدول الفيديوهات
         c.execute('''
             CREATE TABLE IF NOT EXISTS video_archive (
                 id SERIAL PRIMARY KEY,
@@ -49,6 +53,13 @@ def init_db():
                 chat_id BIGINT,
                 file_name TEXT,
                 category TEXT DEFAULT 'Uncategorized'
+            )
+        ''')
+        # جدول إعدادات البوت لتخزين التصنيف النشط
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                setting_key TEXT PRIMARY KEY,
+                setting_value TEXT
             )
         ''')
         conn.commit()
@@ -89,7 +100,7 @@ def get_videos(category=None):
         return []
 
 def search_videos(query):
-    """البحث عن فيديوهات في قاعدة البيانات."""
+    """البحث عن فيديوهات في قاعدة البيانات (بحث شامل)."""
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
@@ -104,7 +115,7 @@ def search_videos(query):
         return []
 
 def update_video_category(message_id, category):
-    """تحديث تصنيف فيديو معين."""
+    """تحديث تصنيف فيديو معين (للتصنيف اليدوي)."""
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
@@ -115,6 +126,36 @@ def update_video_category(message_id, category):
     except Exception as e:
         print(f"Update category error: {e}")
         return False
+
+def set_active_category(category_name):
+    """حفظ أو تحديث التصنيف النشط في قاعدة البيانات."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO bot_settings (setting_key, setting_value) 
+            VALUES ('active_category', %s)
+            ON CONFLICT (setting_key) DO UPDATE SET setting_value = EXCLUDED.setting_value
+        """, (category_name,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Set active category error: {e}")
+        return False
+
+def get_active_category():
+    """الحصول على التصنيف النشط حالياً."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        c = conn.cursor()
+        c.execute("SELECT setting_value FROM bot_settings WHERE setting_key = 'active_category'")
+        result = c.fetchone()
+        conn.close()
+        return result[0] if result else 'Uncategorized'
+    except Exception as e:
+        print(f"Get active category error: {e}")
+        return 'Uncategorized'
 
 # --- إعداد القائمة الرئيسية ---
 def main_menu():
@@ -154,18 +195,44 @@ def list_videos(message):
 
 # --- أوامر الآدمن ---
 
-@bot.message_handler(commands=['add_category'])
-def add_category_start(message):
-    """بدء عملية إضافة تصنيف جديد (للآدمن فقط)."""
+@bot.message_handler(commands=['set_category'])
+def handle_set_category(message):
+    """أمر للآدمن لتعيين التصنيف النشط للفيديوهات الجديدة."""
     if str(message.from_user.id) != ADMIN_ID:
         bot.reply_to(message, "هذا الأمر مخصص لصاحب البوت فقط.")
         return
     
-    msg = bot.send_message(message.chat.id, "من فضلك، قم بإعادة توجيه (Forward) الفيديو الذي تريد تصنيفه.")
+    try:
+        category_name = message.text.split(maxsplit=1)[1].strip()
+        if set_active_category(category_name):
+            bot.reply_to(message, f"✅ تم تعيين التصنيف النشط بنجاح. أي فيديو جديد سيتم إضافته تحت فئة '{category_name}'.")
+        else:
+            bot.reply_to(message, "حدث خطأ أثناء تعيين التصنيف.")
+    except IndexError:
+        bot.reply_to(message, "الاستخدام الصحيح: /set_category <اسم التصنيف>")
+
+@bot.message_handler(commands=['current_category'])
+def handle_current_category(message):
+    """أمر للآدمن لمعرفة التصنيف النشط حالياً."""
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "هذا الأمر مخصص لصاحب البوت فقط.")
+        return
+    
+    active_category = get_active_category()
+    bot.reply_to(message, f"ℹ️ التصنيف النشط حالياً هو: '{active_category}'.")
+
+@bot.message_handler(commands=['add_category'])
+def add_category_start(message):
+    """بدء عملية التصنيف اليدوي لفيديو معين (للآدمن فقط)."""
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "هذا الأمر مخصص لصاحب البوت فقط.")
+        return
+    
+    msg = bot.send_message(message.chat.id, "من فضلك، قم بإعادة توجيه (Forward) الفيديو الذي تريد تصنيفه يدوياً.")
     bot.register_next_step_handler(msg, process_forwarded_video)
 
 def process_forwarded_video(message):
-    """معالجة الفيديو المعاد توجيهه."""
+    """معالجة الفيديو المعاد توجيهه للتصنيف اليدوي."""
     if not message.forward_from_message_id:
         bot.send_message(message.chat.id, "خطأ: يرجى إعادة توجيه رسالة الفيديو الأصلية من القناة.")
         return
@@ -177,7 +244,7 @@ def process_forwarded_video(message):
     bot.register_next_step_handler(msg, process_category_name)
 
 def process_category_name(message):
-    """معالجة اسم التصنيف وتحديث قاعدة البيانات."""
+    """معالجة اسم التصنيف وتحديث قاعدة البيانات (للتصنيف اليدوي)."""
     category_name = message.text.strip()
     video_message_id = admin_steps.get(message.chat.id, {}).get('video_message_id')
 
@@ -186,56 +253,12 @@ def process_category_name(message):
         return
 
     if update_video_category(video_message_id, category_name):
-        bot.send_message(message.chat.id, f"✅ تم تحديث تصنيف الفيديو بنجاح إلى '{category_name}'.")
+        bot.send_message(message.chat.id, f"✅ تم تحديث تصنيف الفيديو المحدد بنجاح إلى '{category_name}'.")
     else:
         bot.send_message(message.chat.id, "حدث خطأ أثناء تحديث قاعدة البيانات.")
     
     if message.chat.id in admin_steps:
         del admin_steps[message.chat.id]
-
-@bot.message_handler(commands=['admin_fetch_history'])
-def handle_fetch_command(message):
-    """بدء عملية جلب الرسائل القديمة بأمان (للآدمن فقط)."""
-    global FETCH_REQUESTED
-    if str(message.from_user.id) != ADMIN_ID:
-        bot.reply_to(message, "هذا الأمر مخصص لصاحب البوت فقط.")
-        return
-    
-    bot.reply_to(message, "تم استلام طلب جلب الرسائل القديمة. سيتوقف البوت مؤقتاً عن الاستجابة حتى انتهاء العملية. سيتم إعلامك عند الانتهاء.")
-    FETCH_REQUESTED = True
-    bot.stop_polling()
-
-def fetch_all_videos_from_channel():
-    """جلب كل الفيديوهات من القناة وحفظها في قاعدة البيانات."""
-    print("Starting to fetch all video messages from the channel...")
-    offset = 0
-    videos_fetched = 0
-    try:
-        while True:
-            updates = bot.get_updates(offset=offset, limit=100, timeout=30)
-            if not updates:
-                print("No more messages to fetch.")
-                break
-
-            for update in updates:
-                offset = update.update_id + 1
-                message = update.message or update.channel_post
-                
-                if message and str(message.chat.id) == CHANNEL_ID and message.video:
-                    add_video(
-                        message_id=message.message_id,
-                        caption=message.caption,
-                        chat_id=message.chat.id,
-                        file_name=message.video.file_name if message.video else ""
-                    )
-                    videos_fetched += 1
-                    print(f"Fetched video #{videos_fetched} | Message ID: {message.message_id}")
-            time.sleep(2)
-        print(f"\nFetching complete! Total videos saved: {videos_fetched}")
-        bot.send_message(ADMIN_ID, f"✅ اكتملت عملية جلب الرسائل القديمة بنجاح. تم حفظ {videos_fetched} فيديو.")
-    except Exception as e:
-        print(f"An error occurred while fetching messages: {e}")
-        bot.send_message(ADMIN_ID, f"❌ حدث خطأ أثناء عملية جلب الرسائل: {e}")
 
 # --- معالجات الرسائل العامة ---
 
@@ -261,14 +284,16 @@ def handle_text_search(message):
 
 @bot.message_handler(content_types=['video'])
 def handle_new_video(message):
-    """حفظ أي فيديو جديد يتم إرساله إلى القناة المراقبة."""
+    """حفظ أي فيديو جديد يتم إرساله إلى القناة المراقبة بالتصنيف النشط."""
     if str(message.chat.id) == CHANNEL_ID:
-        print(f"New video detected in channel {CHANNEL_ID}. Message ID: {message.message_id}")
+        active_category = get_active_category()
+        print(f"New video detected. Assigning to active category: '{active_category}'. Message ID: {message.message_id}")
         add_video(
             message_id=message.message_id,
             caption=message.caption,
             chat_id=message.chat.id,
-            file_name=message.video.file_name if message.video else ""
+            file_name=message.video.file_name if message.video else "",
+            category=active_category
         )
 
 # --- معالج ضغطات الأزرار ---
@@ -306,26 +331,12 @@ def callback_query(call):
 # --- نقطة انطلاق البوت ---
 
 if __name__ == "__main__":
-    if not all([BOT_TOKEN, DATABASE_URL, CHANNEL_ID, ADMIN_ID]):
-        print("Error: Missing one or more environment variables (BOT_TOKEN, DATABASE_URL, CHANNEL_ID, ADMIN_ID).")
-    else:
-        init_db()
-        print("Bot is starting...")
-        while True:
-            try:
-                print("Bot is polling for messages...")
-                bot.polling(non_stop=False)
-
-                if FETCH_REQUESTED:
-                    print("Polling stopped to fetch history.")
-                    fetch_all_videos_from_channel()
-                    FETCH_REQUESTED = False
-                    print("History fetch complete. Restarting polling.")
-                else:
-                    # If polling stopped for any other reason, wait before restarting
-                    time.sleep(5)
-
-            except Exception as e:
-                print(f"An error occurred in the main loop: {e}")
-                print("Restarting in 15 seconds...")
-                time.sleep(15)
+    init_db()
+    print("Bot is starting...")
+    while True:
+        try:
+            bot.polling(non_stop=True)
+        except Exception as e:
+            print(f"An error occurred in the main loop: {e}")
+            print("Restarting in 15 seconds...")
+            time.sleep(15)
