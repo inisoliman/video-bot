@@ -64,11 +64,48 @@ def init_db():
                 setting_value TEXT
             )
         ''')
+        # جدول جديد لتسجيل المستخدمين
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS bot_users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         conn.commit()
         conn.close()
         print("Database initialized successfully.")
     except Exception as e:
         print(f"Database error during init: {e}")
+
+def add_bot_user(user_id, username, first_name):
+    """إضافة مستخدم جديد إلى قاعدة البيانات عند أول تفاعل."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO bot_users (user_id, username, first_name)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (user_id) DO NOTHING
+        """, (user_id, username, first_name))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Add bot user error: {e}")
+
+def get_subscriber_count():
+    """الحصول على العدد الإجمالي للمشتركين."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM bot_users")
+        count = c.fetchone()[0]
+        conn.close()
+        return count
+    except Exception as e:
+        print(f"Get subscriber count error: {e}")
+        return 0
 
 def add_video(message_id, caption, chat_id, file_name=None, category='Uncategorized'):
     """إضافة فيديو جديد إلى قاعدة البيانات."""
@@ -130,7 +167,7 @@ def get_all_distinct_categories():
         return []
 
 def get_bot_stats():
-    """الحصول على إحصائيات البوت."""
+    """الحصول على إحصائيات المحتوى."""
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
@@ -287,6 +324,8 @@ def create_paginated_keyboard(items, total_items, page, prefix, context):
 
 @bot.message_handler(commands=['start'])
 def start(message):
+    # تسجيل المستخدم عند أول تفاعل
+    add_bot_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
     bot.reply_to(message, "أهلاً بك في بوت البحث عن الفيديوهات!", reply_markup=main_menu())
 
 def main_menu():
@@ -330,14 +369,15 @@ def list_videos(message, edit_message=None):
 def generate_admin_panel():
     """إنشاء لوحة تحكم الآدمن."""
     keyboard = InlineKeyboardMarkup(row_width=2)
+    btn_subs = InlineKeyboardButton("👤 عدد المشتركين", callback_data="admin::sub_count")
+    btn_stats = InlineKeyboardButton("📊 إحصائيات المحتوى", callback_data="admin::stats")
     btn_add = InlineKeyboardButton("➕ إضافة تصنيف جديد", callback_data="admin::add_new_cat")
     btn_set_active = InlineKeyboardButton("🔘 تعيين التصنيف النشط", callback_data="admin::set_active")
-    btn_stats = InlineKeyboardButton("📊 إحصائيات البوت", callback_data="admin::stats")
     btn_rename = InlineKeyboardButton("✏️ إعادة تسمية / نقل جماعي", callback_data="admin::rename")
     btn_delete = InlineKeyboardButton("🗑️ حذف تصنيف", callback_data="admin::delete")
     btn_move_video = InlineKeyboardButton("↔️ نقل فيديو فردي", callback_data="admin::move_video")
     btn_help = InlineKeyboardButton("ℹ️ عرض المساعدة", callback_data="admin::help")
-    keyboard.add(btn_add, btn_set_active, btn_stats, btn_rename, btn_delete, btn_move_video, btn_help)
+    keyboard.add(btn_subs, btn_stats, btn_add, btn_set_active, btn_rename, btn_delete, btn_move_video, btn_help)
     return keyboard
 
 @bot.message_handler(commands=['admin'])
@@ -420,13 +460,11 @@ def handle_text_search(message):
     if message.text.startswith('/'): return
     query = message.text.strip()
     
-    # Store the query to be used by callback handlers
     user_last_search[message.chat.id] = query
     
     categories = get_all_distinct_categories()
     keyboard = InlineKeyboardMarkup(row_width=1)
     
-    # Remove query from callback_data to prevent errors
     keyboard.add(InlineKeyboardButton("بحث في كل التصنيفات", callback_data=f"search_scope::all"))
     
     for cat in categories:
@@ -460,9 +498,13 @@ def callback_query(call):
             sub_action = data[1]
             bot.answer_callback_query(call.id)
             
-            if sub_action == "stats":
+            if sub_action == "sub_count":
+                count = get_subscriber_count()
+                bot.send_message(call.message.chat.id, f"👤 إجمالي عدد المشتركين في البوت: *{count}*", parse_mode='Markdown')
+            
+            elif sub_action == "stats":
                 video_count, category_count = get_bot_stats()
-                stats_text = f"📊 *إحصائيات البوت*\n\n- إجمالي الفيديوهات: *{video_count}*\n- إجمالي التصنيفات: *{category_count}*"
+                stats_text = f"📊 *إحصائيات المحتوى*\n\n- إجمالي الفيديوهات: *{video_count}*\n- إجمالي التصنيفات: *{category_count}*"
                 bot.send_message(call.message.chat.id, stats_text, parse_mode='Markdown')
             
             elif sub_action == "add_new_cat":
