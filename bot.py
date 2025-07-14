@@ -1,6 +1,6 @@
 # ==============================================================================
 # ملف: bot.py
-# الوصف: الإصدار النهائي مع نظام التصنيف النشط والبحث الذكي.
+# الوصف: الإصدار النهائي مع لوحة تحكم للآدمن.
 # ==============================================================================
 
 import telebot
@@ -219,6 +219,22 @@ def rename_category_in_db(old_name, new_name):
     except Exception as e:
         print(f"Rename category error: {e}")
         return False
+        
+def delete_category_db(category_to_delete, target_category='أفلام'):
+    """حذف تصنيف ونقل فيديوهاته إلى تصنيف آخر."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        c = conn.cursor()
+        # نقل الفيديوهات إلى التصنيف الهدف
+        c.execute("UPDATE video_archive SET category = %s WHERE category = %s", (target_category, category_to_delete))
+        # التحقق مما إذا كان التصنيف النشط هو الذي يتم حذفه
+        c.execute("UPDATE bot_settings SET setting_value = %s WHERE setting_key = 'active_category' AND setting_value = %s", (target_category, category_to_delete))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Delete category error: {e}")
+        return False
 
 # --- دوال مساعدة ---
 def create_paginated_keyboard(items, total_items, page, prefix, query_or_cat):
@@ -243,7 +259,6 @@ def create_paginated_keyboard(items, total_items, page, prefix, query_or_cat):
         
         keyboard.row(*nav_buttons)
     
-    # إضافة زر الرجوع إلى قائمة التصنيفات الرئيسية
     keyboard.row(InlineKeyboardButton("الرجوع إلى التصنيفات", callback_data="back_to_cats"))
         
     return keyboard
@@ -266,7 +281,7 @@ def handle_list_videos_button(message):
     list_videos(message)
 
 def list_videos(message, edit_message=None):
-    """عرض جميع الفئات المتاحة كأزرار، مع إمكانية تعديل رسالة موجودة."""
+    """عرض جميع الفئات المتاحة كأزرار، بما في ذلك التصنيف النشط."""
     existing_categories = get_all_distinct_categories()
     active_category = get_active_category()
     all_possible_categories = set(existing_categories)
@@ -278,10 +293,9 @@ def list_videos(message, edit_message=None):
     sorted_categories = sorted(list(all_possible_categories))
 
     if not sorted_categories:
-        if edit_message:
-            bot.answer_callback_query(edit_message.id, "لا توجد أي تصنيفات متاحة حالياً.")
-        else:
-            bot.reply_to(message, "لا توجد أي تصنيفات متاحة حالياً.")
+        text = "لا توجد أي تصنيفات متاحة حالياً."
+        if edit_message: bot.answer_callback_query(edit_message.id, text)
+        else: bot.reply_to(message, text)
         return
 
     keyboard = InlineKeyboardMarkup(row_width=2)
@@ -289,90 +303,67 @@ def list_videos(message, edit_message=None):
     keyboard.add(*buttons)
     
     text = "اختر فئة لعرض فيديوهاتها:"
-    if edit_message:
-        bot.edit_message_text(text, edit_message.chat.id, edit_message.message_id, reply_markup=keyboard)
-    else:
-        bot.reply_to(message, text, reply_markup=keyboard)
+    if edit_message: bot.edit_message_text(text, edit_message.chat.id, edit_message.message_id, reply_markup=keyboard)
+    else: bot.reply_to(message, text, reply_markup=keyboard)
 
 # --- أوامر الآدمن ---
-@bot.message_handler(commands=['help_admin'])
-def help_admin(message):
-    if str(message.from_user.id) != ADMIN_ID: return
-    help_text = "قائمة أوامر الإدارة:\n/set_category <اسم>\n/current_category\n/rename_category\n/bulk_move\n/move_video\n/add_category"
-    bot.send_message(message.chat.id, help_text)
+def generate_admin_panel():
+    """إنشاء لوحة تحكم الآدمن."""
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    btn1 = InlineKeyboardButton("🔘 تعيين التصنيف النشط", callback_data="admin_set_active")
+    btn2 = InlineKeyboardButton("✏️ إعادة تسمية / نقل جماعي", callback_data="admin_rename")
+    btn3 = InlineKeyboardButton("🗑️ حذف تصنيف", callback_data="admin_delete")
+    btn4 = InlineKeyboardButton("↔️ نقل فيديو فردي", callback_data="admin_move_video")
+    btn5 = InlineKeyboardButton("ℹ️ عرض المساعدة", callback_data="admin_help")
+    keyboard.add(btn1, btn2, btn3, btn4, btn5)
+    return keyboard
 
-@bot.message_handler(commands=['set_category', 'current_category', 'add_category', 'rename_category', 'bulk_move', 'move_video'])
-def admin_commands(message):
+@bot.message_handler(commands=['admin'])
+def admin_panel(message):
     if str(message.from_user.id) != ADMIN_ID:
         bot.reply_to(message, "هذا الأمر مخصص لصاحب البوت فقط.")
         return
-    
-    command = message.text.split()[0]
-    if command == '/set_category':
-        try:
-            category_name = message.text.split(maxsplit=1)[1].strip()
-            if set_active_category(category_name):
-                bot.reply_to(message, f"✅ تم تعيين التصنيف النشط إلى '{category_name}'.")
-        except IndexError:
-            bot.reply_to(message, "الاستخدام: /set_category <اسم التصنيف>")
-    elif command == '/current_category':
-        active_category = get_active_category()
-        bot.reply_to(message, f"ℹ️ التصنيف النشط حالياً هو: '{active_category}'.")
-    elif command in ['/add_category', '/move_video']:
-        action = "تصنيفه يدوياً" if command == '/add_category' else "نقل تصنيفه"
-        msg = bot.send_message(message.chat.id, f"من فضلك، قم بإعادة توجيه الفيديو الذي تريد {action}.")
-        if command == '/add_category':
-            bot.register_next_step_handler(msg, process_forwarded_video)
-        else:
-            bot.register_next_step_handler(msg, process_video_to_move)
-    elif command in ['/rename_category', '/bulk_move']:
-        msg = bot.send_message(message.chat.id, "من فضلك, أرسل اسم التصنيف المصدر (الذي تريد نقله أو تغيير اسمه).")
-        bot.register_next_step_handler(msg, process_old_category_name)
+    bot.send_message(message.chat.id, "أهلاً بك في لوحة تحكم الآدمن. اختر أحد الخيارات:", reply_markup=generate_admin_panel())
 
-def process_forwarded_video(message):
-    if not message.forward_from_message_id:
-        bot.send_message(message.chat.id, "خطأ: يرجى إعادة توجيه الرسالة.")
-        return
-    original_message_id = message.forward_from_message_id
-    admin_steps[message.chat.id] = {'video_message_id': original_message_id}
-    msg = bot.send_message(message.chat.id, "ممتاز. الآن أرسل اسم التصنيف الجديد.")
-    bot.register_next_step_handler(msg, process_category_name)
-
-def process_category_name(message):
+# --- معالجات خطوات الآدمن ---
+def handle_set_active_category(message):
     category_name = message.text.strip()
-    video_message_id = admin_steps.pop(message.chat.id, {}).get('video_message_id')
-    if not video_message_id: return
-    if update_video_category(video_message_id, category_name):
-        bot.send_message(message.chat.id, f"✅ تم تحديث تصنيف الفيديو بنجاح إلى '{category_name}'.")
+    if set_active_category(category_name):
+        bot.reply_to(message, f"✅ تم تعيين التصنيف النشط بنجاح إلى '{category_name}'.")
 
-def process_video_to_move(message):
+def handle_rename_old(message):
+    old_name = message.text.strip()
+    admin_steps[message.chat.id] = {'old_category_name': old_name}
+    msg = bot.send_message(message.chat.id, f"حسناً. الآن أرسل الاسم الجديد.")
+    bot.register_next_step_handler(msg, handle_rename_new)
+
+def handle_rename_new(message):
+    new_name = message.text.strip()
+    old_name = admin_steps.pop(message.chat.id, {}).get('old_category_name')
+    if not old_name: return
+    if rename_category_in_db(old_name, new_name):
+        bot.send_message(message.chat.id, f"✅ تم تغيير اسم التصنيف من '{old_name}' إلى '{new_name}'.")
+
+def handle_delete_category(message):
+    category_to_delete = message.text.strip()
+    if delete_category_db(category_to_delete):
+        bot.send_message(message.chat.id, f"✅ تم حذف التصنيف '{category_to_delete}' بنجاح ونقل محتوياته إلى 'أفلام'.")
+
+def handle_move_video_forward(message):
     if not message.forward_from_message_id:
         bot.send_message(message.chat.id, "خطأ: يرجى إعادة توجيه الرسالة.")
         return
     original_message_id = message.forward_from_message_id
     admin_steps[message.chat.id] = {'video_to_move_id': original_message_id}
     msg = bot.send_message(message.chat.id, "ممتاز. الآن أرسل اسم التصنيف الجديد.")
-    bot.register_next_step_handler(msg, process_new_category_for_move)
+    bot.register_next_step_handler(msg, handle_move_video_new_cat)
 
-def process_new_category_for_move(message):
+def handle_move_video_new_cat(message):
     new_category_name = message.text.strip()
     video_message_id = admin_steps.pop(message.chat.id, {}).get('video_to_move_id')
     if not video_message_id: return
     if update_video_category(video_message_id, new_category_name):
         bot.send_message(message.chat.id, f"✅ تم نقل الفيديو بنجاح إلى '{new_category_name}'.")
-
-def process_old_category_name(message):
-    old_name = message.text.strip()
-    admin_steps[message.chat.id] = {'old_category_name': old_name}
-    msg = bot.send_message(message.chat.id, f"حسناً. الآن أرسل الاسم الجديد.")
-    bot.register_next_step_handler(msg, process_new_category_name)
-
-def process_new_category_name(message):
-    new_name = message.text.strip()
-    old_name = admin_steps.pop(message.chat.id, {}).get('old_category_name')
-    if not old_name: return
-    if rename_category_in_db(old_name, new_name):
-        bot.send_message(message.chat.id, f"✅ تم تغيير اسم التصنيف من '{old_name}' إلى '{new_name}'.")
 
 # --- معالجات الرسائل العامة ---
 
@@ -380,8 +371,7 @@ def process_new_category_name(message):
 def handle_text_search(message):
     """البحث التلقائي عند إرسال أي نص."""
     query = message.text.strip()
-    if not query or query.startswith('/'):
-        return
+    if not query or query.startswith('/'): return
     
     user_last_search[message.chat.id] = query
     videos, total_count = search_videos(query, page=0)
@@ -413,6 +403,27 @@ def handle_new_video(message):
 def callback_query(call):
     """الاستجابة عند الضغط على الأزرار."""
     try:
+        if call.data.startswith("admin_"):
+            action = call.data.split('_')[1]
+            bot.answer_callback_query(call.id)
+            
+            if action == "set_active":
+                msg = bot.send_message(call.message.chat.id, "أرسل اسم التصنيف الذي تريد تفعيله.")
+                bot.register_next_step_handler(msg, handle_set_active_category)
+            elif action == "rename":
+                msg = bot.send_message(call.message.chat.id, "أرسل اسم التصنيف المصدر (القديم).")
+                bot.register_next_step_handler(msg, handle_rename_old)
+            elif action == "delete":
+                msg = bot.send_message(call.message.chat.id, "أرسل اسم التصنيف الذي تريد حذفه.")
+                bot.register_next_step_handler(msg, handle_delete_category)
+            elif action == "move_video":
+                msg = bot.send_message(call.message.chat.id, "قم بإعادة توجيه الفيديو الذي تريد نقله.")
+                bot.register_next_step_handler(msg, handle_move_video_forward)
+            elif action == "help":
+                help_text = "قائمة أوامر الإدارة:\n- تعيين التصنيف النشط\n- إعادة تسمية / نقل جماعي\n- حذف تصنيف\n- نقل فيديو فردي"
+                bot.send_message(call.message.chat.id, help_text)
+            return
+
         if call.data == "back_to_cats":
             list_videos(call.message, edit_message=call.message)
             bot.answer_callback_query(call.id)
@@ -427,10 +438,8 @@ def callback_query(call):
             bot.answer_callback_query(call.id, "جاري إرسال الفيديو...")
         
         elif action == "cat":
-            # The category name might contain underscores, so we join them back
             category = "_".join(data[1:-1])
-            page_str = data[-1]
-            page = int(page_str)
+            page = int(data[-1])
             videos, total_count = get_videos(category, page)
             keyboard = create_paginated_keyboard(videos, total_count, page, "cat", category)
             bot.edit_message_text(f"الفيديوهات في فئة '{category}':", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
