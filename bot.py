@@ -1,6 +1,6 @@
 # ==============================================================================
 # ملف: bot.py
-# الوصف: الإصدار النهائي مع لوحة تحكم للآدمن.
+# الوصف: الإصدار النهائي مع لوحة تحكم متكاملة للآدمن.
 # ==============================================================================
 
 import telebot
@@ -128,6 +128,21 @@ def get_all_distinct_categories():
         print(f"Get distinct categories error: {e}")
         return []
 
+def get_bot_stats():
+    """الحصول على إحصائيات البوت."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM video_archive")
+        video_count = c.fetchone()[0]
+        c.execute("SELECT COUNT(DISTINCT category) FROM video_archive")
+        category_count = c.fetchone()[0]
+        conn.close()
+        return video_count, category_count
+    except Exception as e:
+        print(f"Get bot stats error: {e}")
+        return 0, 0
+
 def search_videos(query, page=0):
     """البحث عن فيديوهات في قاعدة البيانات مع تطبيع الحروف العربية (البحث الذكي)."""
     offset = page * VIDEOS_PER_PAGE
@@ -225,9 +240,7 @@ def delete_category_db(category_to_delete, target_category='أفلام'):
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
-        # نقل الفيديوهات إلى التصنيف الهدف
         c.execute("UPDATE video_archive SET category = %s WHERE category = %s", (target_category, category_to_delete))
-        # التحقق مما إذا كان التصنيف النشط هو الذي يتم حذفه
         c.execute("UPDATE bot_settings SET setting_value = %s WHERE setting_key = 'active_category' AND setting_value = %s", (target_category, category_to_delete))
         conn.commit()
         conn.close()
@@ -310,12 +323,13 @@ def list_videos(message, edit_message=None):
 def generate_admin_panel():
     """إنشاء لوحة تحكم الآدمن."""
     keyboard = InlineKeyboardMarkup(row_width=2)
-    btn1 = InlineKeyboardButton("🔘 تعيين التصنيف النشط", callback_data="admin_set_active")
-    btn2 = InlineKeyboardButton("✏️ إعادة تسمية / نقل جماعي", callback_data="admin_rename")
-    btn3 = InlineKeyboardButton("🗑️ حذف تصنيف", callback_data="admin_delete")
-    btn4 = InlineKeyboardButton("↔️ نقل فيديو فردي", callback_data="admin_move_video")
-    btn5 = InlineKeyboardButton("ℹ️ عرض المساعدة", callback_data="admin_help")
-    keyboard.add(btn1, btn2, btn3, btn4, btn5)
+    btn1 = InlineKeyboardButton("📊 إحصائيات البوت", callback_data="admin_stats")
+    btn2 = InlineKeyboardButton("🔘 تعيين التصنيف النشط", callback_data="admin_set_active")
+    btn3 = InlineKeyboardButton("✏️ إعادة تسمية / نقل جماعي", callback_data="admin_rename")
+    btn4 = InlineKeyboardButton("🗑️ حذف تصنيف", callback_data="admin_delete")
+    btn5 = InlineKeyboardButton("↔️ نقل فيديو فردي", callback_data="admin_move_video")
+    btn6 = InlineKeyboardButton("ℹ️ عرض المساعدة", callback_data="admin_help")
+    keyboard.add(btn1, btn2, btn3, btn4, btn5, btn6)
     return keyboard
 
 @bot.message_handler(commands=['admin'])
@@ -325,19 +339,40 @@ def admin_panel(message):
         return
     bot.send_message(message.chat.id, "أهلاً بك في لوحة تحكم الآدمن. اختر أحد الخيارات:", reply_markup=generate_admin_panel())
 
+@bot.message_handler(commands=['cancel'])
+def cancel_step(message):
+    if str(message.from_user.id) != ADMIN_ID: return
+    if message.chat.id in admin_steps:
+        del admin_steps[message.chat.id]
+        bot.send_message(message.chat.id, "✅ تم إلغاء العملية الحالية بنجاح.")
+    else:
+        bot.send_message(message.chat.id, "لا توجد عملية لإلغائها.")
+
 # --- معالجات خطوات الآدمن ---
+def check_cancel(message):
+    """دالة للتحقق من أمر الإلغاء في أي خطوة."""
+    if message.text == '/cancel':
+        if message.chat.id in admin_steps:
+            del admin_steps[message.chat.id]
+        bot.send_message(message.chat.id, "✅ تم إلغاء العملية الحالية بنجاح.")
+        return True
+    return False
+
 def handle_set_active_category(message):
+    if check_cancel(message): return
     category_name = message.text.strip()
     if set_active_category(category_name):
         bot.reply_to(message, f"✅ تم تعيين التصنيف النشط بنجاح إلى '{category_name}'.")
 
 def handle_rename_old(message):
+    if check_cancel(message): return
     old_name = message.text.strip()
     admin_steps[message.chat.id] = {'old_category_name': old_name}
-    msg = bot.send_message(message.chat.id, f"حسناً. الآن أرسل الاسم الجديد.")
+    msg = bot.send_message(message.chat.id, f"حسناً. الآن أرسل الاسم الجديد. (أو أرسل /cancel للإلغاء)")
     bot.register_next_step_handler(msg, handle_rename_new)
 
 def handle_rename_new(message):
+    if check_cancel(message): return
     new_name = message.text.strip()
     old_name = admin_steps.pop(message.chat.id, {}).get('old_category_name')
     if not old_name: return
@@ -345,20 +380,24 @@ def handle_rename_new(message):
         bot.send_message(message.chat.id, f"✅ تم تغيير اسم التصنيف من '{old_name}' إلى '{new_name}'.")
 
 def handle_delete_category(message):
+    if check_cancel(message): return
     category_to_delete = message.text.strip()
     if delete_category_db(category_to_delete):
         bot.send_message(message.chat.id, f"✅ تم حذف التصنيف '{category_to_delete}' بنجاح ونقل محتوياته إلى 'أفلام'.")
 
 def handle_move_video_forward(message):
+    if check_cancel(message): return
     if not message.forward_from_message_id:
-        bot.send_message(message.chat.id, "خطأ: يرجى إعادة توجيه الرسالة.")
+        bot.send_message(message.chat.id, "خطأ: يرجى إعادة توجيه الرسالة. (أو أرسل /cancel للإلغاء)")
+        bot.register_next_step_handler(message, handle_move_video_forward)
         return
     original_message_id = message.forward_from_message_id
     admin_steps[message.chat.id] = {'video_to_move_id': original_message_id}
-    msg = bot.send_message(message.chat.id, "ممتاز. الآن أرسل اسم التصنيف الجديد.")
+    msg = bot.send_message(message.chat.id, "ممتاز. الآن أرسل اسم التصنيف الجديد. (أو أرسل /cancel للإلغاء)")
     bot.register_next_step_handler(msg, handle_move_video_new_cat)
 
 def handle_move_video_new_cat(message):
+    if check_cancel(message): return
     new_category_name = message.text.strip()
     video_message_id = admin_steps.pop(message.chat.id, {}).get('video_to_move_id')
     if not video_message_id: return
@@ -369,23 +408,18 @@ def handle_move_video_new_cat(message):
 
 @bot.message_handler(content_types=['text'])
 def handle_text_search(message):
-    """البحث التلقائي عند إرسال أي نص."""
+    if message.text.startswith('/'): return
     query = message.text.strip()
-    if not query or query.startswith('/'): return
-    
     user_last_search[message.chat.id] = query
     videos, total_count = search_videos(query, page=0)
-
     if not videos:
         bot.reply_to(message, f"لم يتم العثور على نتائج للبحث عن '{query}'.")
         return
-
     keyboard = create_paginated_keyboard(videos, total_count, 0, "search", "query")
     bot.reply_to(message, f"نتائج البحث عن '{query}':", reply_markup=keyboard)
 
 @bot.message_handler(content_types=['video'])
 def handle_new_video(message):
-    """حفظ أي فيديو جديد يتم إرساله إلى القناة المراقبة بالتصنيف النشط."""
     if str(message.chat.id) == CHANNEL_ID:
         active_category = get_active_category()
         print(f"New video detected. Assigning to active category: '{active_category}'. Message ID: {message.message_id}")
@@ -407,20 +441,24 @@ def callback_query(call):
             action = call.data.split('_')[1]
             bot.answer_callback_query(call.id)
             
-            if action == "set_active":
-                msg = bot.send_message(call.message.chat.id, "أرسل اسم التصنيف الذي تريد تفعيله.")
+            if action == "stats":
+                video_count, category_count = get_bot_stats()
+                stats_text = f"📊 *إحصائيات البوت*\n\n- إجمالي الفيديوهات: *{video_count}*\n- إجمالي التصنيفات: *{category_count}*"
+                bot.send_message(call.message.chat.id, stats_text, parse_mode='Markdown')
+            elif action == "set_active":
+                msg = bot.send_message(call.message.chat.id, "أرسل اسم التصنيف الذي تريد تفعيله. (أو أرسل /cancel للإلغاء)")
                 bot.register_next_step_handler(msg, handle_set_active_category)
             elif action == "rename":
-                msg = bot.send_message(call.message.chat.id, "أرسل اسم التصنيف المصدر (القديم).")
+                msg = bot.send_message(call.message.chat.id, "أرسل اسم التصنيف المصدر (القديم). (أو أرسل /cancel للإلغاء)")
                 bot.register_next_step_handler(msg, handle_rename_old)
             elif action == "delete":
-                msg = bot.send_message(call.message.chat.id, "أرسل اسم التصنيف الذي تريد حذفه.")
+                msg = bot.send_message(call.message.chat.id, "أرسل اسم التصنيف الذي تريد حذفه. (أو أرسل /cancel للإلغاء)")
                 bot.register_next_step_handler(msg, handle_delete_category)
             elif action == "move_video":
-                msg = bot.send_message(call.message.chat.id, "قم بإعادة توجيه الفيديو الذي تريد نقله.")
+                msg = bot.send_message(call.message.chat.id, "قم بإعادة توجيه الفيديو الذي تريد نقله. (أو أرسل /cancel للإلغاء)")
                 bot.register_next_step_handler(msg, handle_move_video_forward)
             elif action == "help":
-                help_text = "قائمة أوامر الإدارة:\n- تعيين التصنيف النشط\n- إعادة تسمية / نقل جماعي\n- حذف تصنيف\n- نقل فيديو فردي"
+                help_text = "قائمة أوامر الإدارة:\n- إحصائيات البوت\n- تعيين التصنيف النشط\n- إعادة تسمية / نقل جماعي\n- حذف تصنيف\n- نقل فيديو فردي"
                 bot.send_message(call.message.chat.id, help_text)
             return
 
