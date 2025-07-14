@@ -1,6 +1,6 @@
 # ==============================================================================
 # ملف: bot.py
-# الوصف: الإصدار النهائي مع لوحة تحكم متكاملة للآدمن.
+# الوصف: الإصدار النهائي مع لوحة تحكم متكاملة للآدمن وبحث متقدم.
 # ==============================================================================
 
 import telebot
@@ -37,8 +37,8 @@ if DATABASE_URL:
 
 # قاموس مؤقت لتخزين بيانات عمليات الآدمن
 admin_steps = {}
-user_last_search = {} # لتخزين آخر عملية بحث لكل مستخدم
 VIDEOS_PER_PAGE = 10 # عدد الفيديوهات في كل صفحة
+CALLBACK_DELIMITER = '::' # فاصل آمن للبيانات
 
 # --- دوال قاعدة البيانات ---
 
@@ -143,33 +143,42 @@ def get_bot_stats():
         print(f"Get bot stats error: {e}")
         return 0, 0
 
-def search_videos(query, page=0):
+def search_videos(query, page=0, category=None):
     """البحث عن فيديوهات في قاعدة البيانات مع تطبيع الحروف العربية (البحث الذكي)."""
     offset = page * VIDEOS_PER_PAGE
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
         
-        search_param = '%' + query + '%'
+        # Normalize the query text in Python for safer SQL
+        def normalize_text(text):
+            text = text.replace('أ', 'ا').replace('إ', 'ا').replace('آ', 'ا')
+            text = text.replace('ة', 'ه')
+            text = text.replace('ى', 'ي')
+            return text
 
+        normalized_query = normalize_text(query)
+        search_param = '%' + normalized_query + '%'
+
+        # Create a string of nested REPLACE functions for SQL
         def normalize_sql(column_name):
-            step1 = f"REPLACE({column_name}, 'أ', 'ا')"
-            step2 = f"REPLACE({step1}, 'إ', 'ا')"
-            step3 = f"REPLACE({step2}, 'آ', 'ا')"
-            step4 = f"REPLACE({step3}, 'ة', 'ه')"
-            step5 = f"REPLACE({step4}, 'ى', 'ي')"
-            return step5
+            return f"REPLACE(REPLACE(REPLACE(REPLACE(REPLACE({column_name}, 'أ', 'ا'), 'إ', 'ا'), 'آ', 'ا'), 'ة', 'ه'), 'ى', 'ي')"
 
-        normalized_caption = normalize_sql("caption")
-        normalized_file_name = normalize_sql("file_name")
-        normalized_search_param = normalize_sql("%s")
+        # Build the WHERE clause
+        where_clause = f"({normalize_sql('caption')} ILIKE %s OR {normalize_sql('file_name')} ILIKE %s)"
+        params = [search_param, search_param]
 
-        count_query = f"SELECT COUNT(*) FROM video_archive WHERE {normalized_caption} ILIKE {normalized_search_param} OR {normalized_file_name} ILIKE {normalized_search_param}"
-        c.execute(count_query, (search_param, search_param))
+        if category:
+            where_clause += " AND category = %s"
+            params.append(category)
+
+        count_query = f"SELECT COUNT(*) FROM video_archive WHERE {where_clause}"
+        c.execute(count_query, tuple(params))
         total_count = c.fetchone()[0]
 
-        data_query = f"SELECT message_id, caption, chat_id, file_name, category FROM video_archive WHERE {normalized_caption} ILIKE {normalized_search_param} OR {normalized_file_name} ILIKE {normalized_search_param} ORDER BY id LIMIT %s OFFSET %s"
-        c.execute(data_query, (search_param, search_param, VIDEOS_PER_PAGE, offset))
+        data_query = f"SELECT message_id, caption, chat_id, file_name, category FROM video_archive WHERE {where_clause} ORDER BY id LIMIT %s OFFSET %s"
+        params.extend([VIDEOS_PER_PAGE, offset])
+        c.execute(data_query, tuple(params))
         results = c.fetchall()
         
         conn.close()
@@ -250,25 +259,25 @@ def delete_category_db(category_to_delete, target_category='أفلام'):
         return False
 
 # --- دوال مساعدة ---
-def create_paginated_keyboard(items, total_items, page, prefix, query_or_cat):
+def create_paginated_keyboard(items, total_items, page, prefix, context):
     """إنشاء لوحة مفاتيح مع أزرار الصفحات وزر الرجوع."""
     keyboard = InlineKeyboardMarkup(row_width=1)
     
     for item in items:
         message_id, caption, chat_id, file_name, category = item
         title = caption or file_name or "فيديو بدون عنوان"
-        keyboard.add(InlineKeyboardButton(text=f"{title[:50]} ({category})", callback_data=f"video_{message_id}_{chat_id}"))
+        keyboard.add(InlineKeyboardButton(text=f"{title[:50]} ({category})", callback_data=f"video::{message_id}::{chat_id}"))
 
     total_pages = math.ceil(total_items / VIDEOS_PER_PAGE)
     if total_pages > 1:
         nav_buttons = []
         if page > 0:
-            nav_buttons.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"{prefix}_{query_or_cat}_{page - 1}"))
+            nav_buttons.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"{prefix}::{context}::{page - 1}"))
         
         nav_buttons.append(InlineKeyboardButton(f"صفحة {page + 1}/{total_pages}", callback_data="noop"))
 
         if page < total_pages - 1:
-            nav_buttons.append(InlineKeyboardButton("التالي ➡️", callback_data=f"{prefix}_{query_or_cat}_{page + 1}"))
+            nav_buttons.append(InlineKeyboardButton("التالي ➡️", callback_data=f"{prefix}::{context}::{page + 1}"))
         
         keyboard.row(*nav_buttons)
     
@@ -312,7 +321,7 @@ def list_videos(message, edit_message=None):
         return
 
     keyboard = InlineKeyboardMarkup(row_width=2)
-    buttons = [InlineKeyboardButton(text=cat, callback_data=f"cat_{cat}_0") for cat in sorted_categories]
+    buttons = [InlineKeyboardButton(text=cat, callback_data=f"cat::{cat}::0") for cat in sorted_categories]
     keyboard.add(*buttons)
     
     text = "اختر فئة لعرض فيديوهاتها:"
@@ -323,13 +332,13 @@ def list_videos(message, edit_message=None):
 def generate_admin_panel():
     """إنشاء لوحة تحكم الآدمن."""
     keyboard = InlineKeyboardMarkup(row_width=2)
-    btn_add = InlineKeyboardButton("➕ إضافة تصنيف جديد", callback_data="admin_add_new_cat")
-    btn_set_active = InlineKeyboardButton("🔘 تعيين التصنيف النشط", callback_data="admin_set_active")
-    btn_stats = InlineKeyboardButton("📊 إحصائيات البوت", callback_data="admin_stats")
-    btn_rename = InlineKeyboardButton("✏️ إعادة تسمية / نقل جماعي", callback_data="admin_rename")
-    btn_delete = InlineKeyboardButton("🗑️ حذف تصنيف", callback_data="admin_delete")
-    btn_move_video = InlineKeyboardButton("↔️ نقل فيديو فردي", callback_data="admin_move_video")
-    btn_help = InlineKeyboardButton("ℹ️ عرض المساعدة", callback_data="admin_help")
+    btn_add = InlineKeyboardButton("➕ إضافة تصنيف جديد", callback_data="admin::add_new_cat")
+    btn_set_active = InlineKeyboardButton("🔘 تعيين التصنيف النشط", callback_data="admin::set_active")
+    btn_stats = InlineKeyboardButton("📊 إحصائيات البوت", callback_data="admin::stats")
+    btn_rename = InlineKeyboardButton("✏️ إعادة تسمية / نقل جماعي", callback_data="admin::rename")
+    btn_delete = InlineKeyboardButton("🗑️ حذف تصنيف", callback_data="admin::delete")
+    btn_move_video = InlineKeyboardButton("↔️ نقل فيديو فردي", callback_data="admin::move_video")
+    btn_help = InlineKeyboardButton("ℹ️ عرض المساعدة", callback_data="admin::help")
     keyboard.add(btn_add, btn_set_active, btn_stats, btn_rename, btn_delete, btn_move_video, btn_help)
     return keyboard
 
@@ -409,15 +418,21 @@ def handle_move_video_new_cat(message):
 
 @bot.message_handler(content_types=['text'])
 def handle_text_search(message):
+    """يعرض خيارات البحث للمستخدم."""
     if message.text.startswith('/'): return
     query = message.text.strip()
-    user_last_search[message.chat.id] = query
-    videos, total_count = search_videos(query, page=0)
-    if not videos:
-        bot.reply_to(message, f"لم يتم العثور على نتائج للبحث عن '{query}'.")
-        return
-    keyboard = create_paginated_keyboard(videos, total_count, 0, "search", "query")
-    bot.reply_to(message, f"نتائج البحث عن '{query}':", reply_markup=keyboard)
+    
+    categories = get_all_distinct_categories()
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    
+    # Add search in all categories button
+    keyboard.add(InlineKeyboardButton("بحث في كل التصنيفات", callback_data=f"search_all::{query}::0"))
+    
+    # Add buttons for each category
+    for cat in categories:
+        keyboard.add(InlineKeyboardButton(f"بحث في: {cat}", callback_data=f"search_cat::{cat}::{query}::0"))
+        
+    bot.reply_to(message, f"أين تريد البحث عن '{query}'؟", reply_markup=keyboard)
 
 @bot.message_handler(content_types=['video'])
 def handle_new_video(message):
@@ -438,56 +453,55 @@ def handle_new_video(message):
 def callback_query(call):
     """الاستجابة عند الضغط على الأزرار."""
     try:
-        if call.data.startswith("admin_"):
-            action = call.data.split('_')
+        data = call.data.split(CALLBACK_DELIMITER)
+        action = data[0]
+
+        if action == "admin":
+            sub_action = data[1]
+            bot.answer_callback_query(call.id)
             
-            if action[1] == "stats":
+            if sub_action == "stats":
                 video_count, category_count = get_bot_stats()
                 stats_text = f"📊 *إحصائيات البوت*\n\n- إجمالي الفيديوهات: *{video_count}*\n- إجمالي التصنيفات: *{category_count}*"
                 bot.send_message(call.message.chat.id, stats_text, parse_mode='Markdown')
             
-            elif action[1] == "add" and action[2] == "new" and action[3] == "cat":
+            elif sub_action == "add_new_cat":
                 msg = bot.send_message(call.message.chat.id, "أرسل اسم التصنيف الجديد الذي تريد إنشاءه. (أو أرسل /cancel للإلغاء)")
                 bot.register_next_step_handler(msg, handle_add_new_category)
 
-            elif action[1] == "set" and action[2] == "active":
+            elif sub_action == "set_active":
                 categories = get_all_distinct_categories()
                 if not categories:
                     bot.answer_callback_query(call.id, "لا توجد تصنيفات حالياً. قم بإنشاء واحد أولاً.")
                     return
                 keyboard = InlineKeyboardMarkup(row_width=2)
-                buttons = [InlineKeyboardButton(text=cat, callback_data=f"admin_setcat_{cat}") for cat in categories]
+                buttons = [InlineKeyboardButton(text=cat, callback_data=f"admin_setcat::{cat}") for cat in categories]
                 keyboard.add(*buttons)
                 bot.edit_message_text("اختر التصنيف الذي تريد تفعيله:", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
 
-            elif action[1] == "setcat":
-                category_name = "_".join(action[2:])
+            elif sub_action == "setcat":
+                category_name = data[2]
                 if set_active_category(category_name):
                     bot.edit_message_text(f"✅ تم تفعيل التصنيف '{category_name}' بنجاح.", call.message.chat.id, call.message.message_id)
                 
-            elif action[1] == "rename":
+            elif sub_action == "rename":
                 msg = bot.send_message(call.message.chat.id, "أرسل اسم التصنيف المصدر (القديم). (أو أرسل /cancel للإلغاء)")
                 bot.register_next_step_handler(msg, handle_rename_old)
-            elif action[1] == "delete":
+            elif sub_action == "delete":
                 msg = bot.send_message(call.message.chat.id, "أرسل اسم التصنيف الذي تريد حذفه. (أو أرسل /cancel للإلغاء)")
                 bot.register_next_step_handler(msg, handle_delete_category)
-            elif action[1] == "move" and action[2] == "video":
+            elif sub_action == "move_video":
                 msg = bot.send_message(call.message.chat.id, "قم بإعادة توجيه الفيديو الذي تريد نقله. (أو أرسل /cancel للإلغاء)")
                 bot.register_next_step_handler(msg, handle_move_video_forward)
-            elif action[1] == "help":
+            elif sub_action == "help":
                 help_text = "قائمة أوامر الإدارة:\n- إحصائيات البوت\n- تعيين التصنيف النشط\n- إعادة تسمية / نقل جماعي\n- حذف تصنيف\n- نقل فيديو فردي"
                 bot.send_message(call.message.chat.id, help_text)
-            
-            bot.answer_callback_query(call.id)
             return
 
-        if call.data == "back_to_cats":
+        if action == "back_to_cats":
             list_videos(call.message, edit_message=call.message)
             bot.answer_callback_query(call.id)
             return
-
-        data = call.data.split('_')
-        action = data[0]
 
         if action == "video":
             _, message_id, chat_id = data
@@ -495,24 +509,27 @@ def callback_query(call):
             bot.answer_callback_query(call.id, "جاري إرسال الفيديو...")
         
         elif action == "cat":
-            category = "_".join(data[1:-1])
-            page = int(data[-1])
+            _, category, page_str = data
+            page = int(page_str)
             videos, total_count = get_videos(category, page)
             keyboard = create_paginated_keyboard(videos, total_count, page, "cat", category)
             bot.edit_message_text(f"الفيديوهات في فئة '{category}':", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
             bot.answer_callback_query(call.id)
 
-        elif action == "search":
-            _, _, page_str = data
+        elif action == "search_all":
+            _, query, page_str = data
             page = int(page_str)
-            query = user_last_search.get(call.message.chat.id)
-            if not query:
-                bot.answer_callback_query(call.id, "انتهت صلاحية البحث، يرجى البحث مرة أخرى.")
-                return
+            videos, total_count = search_videos(query, page=page)
+            keyboard = create_paginated_keyboard(videos, total_count, page, "search_all", query)
+            bot.edit_message_text(f"نتائج البحث الشامل عن '{query}':", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+            bot.answer_callback_query(call.id)
 
-            videos, total_count = search_videos(query, page)
-            keyboard = create_paginated_keyboard(videos, total_count, page, "search", "query")
-            bot.edit_message_text(f"نتائج البحث عن '{query}':", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+        elif action == "search_cat":
+            _, category, query, page_str = data
+            page = int(page_str)
+            videos, total_count = search_videos(query, page=page, category=category)
+            keyboard = create_paginated_keyboard(videos, total_count, page, f"search_cat::{category}", query)
+            bot.edit_message_text(f"نتائج البحث عن '{query}' في فئة '{category}':", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
             bot.answer_callback_query(call.id)
         
         elif action == "noop":
