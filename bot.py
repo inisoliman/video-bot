@@ -114,6 +114,19 @@ def get_videos(category=None, page=0):
     except Exception as e:
         print(f"Get videos error: {e}")
         return [], 0
+        
+def get_all_distinct_categories():
+    """Gets all unique category names from the video archive."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        c = conn.cursor()
+        c.execute("SELECT DISTINCT category FROM video_archive ORDER BY category")
+        categories = [row[0] for row in c.fetchall()]
+        conn.close()
+        return categories
+    except Exception as e:
+        print(f"Get distinct categories error: {e}")
+        return []
 
 def search_videos(query, page=0):
     """البحث عن فيديوهات في قاعدة البيانات مع تطبيع الحروف العربية (البحث الذكي)."""
@@ -124,7 +137,6 @@ def search_videos(query, page=0):
         
         search_param = '%' + query + '%'
 
-        # دالة مساعدة لإنشاء تعبير التطبيع في SQL
         def normalize_sql(column_name):
             step1 = f"REPLACE({column_name}, 'أ', 'ا')"
             step2 = f"REPLACE({step1}, 'إ', 'ا')"
@@ -137,7 +149,6 @@ def search_videos(query, page=0):
         normalized_file_name = normalize_sql("file_name")
         normalized_search_param = normalize_sql("%s")
 
-        # بناء استعلامات العد والبيانات النهائية
         count_query = f"SELECT COUNT(*) FROM video_archive WHERE {normalized_caption} ILIKE {normalized_search_param} OR {normalized_file_name} ILIKE {normalized_search_param}"
         c.execute(count_query, (search_param, search_param))
         total_count = c.fetchone()[0]
@@ -252,19 +263,29 @@ def handle_list_videos_button(message):
     list_videos(message)
 
 def list_videos(message):
-    """عرض جميع الفئات المتاحة كأزرار."""
-    all_videos, _ = get_videos()
-    if not all_videos:
-        bot.reply_to(message, "لم يتم العثور على أي فيديوهات في قاعدة البيانات.")
-        return
+    """عرض جميع الفئات المتاحة كأزرار، بما في ذلك التصنيف النشط."""
+    # 1. Get categories that already have videos
+    existing_categories = get_all_distinct_categories()
+
+    # 2. Get the currently active category
+    active_category = get_active_category()
+
+    # 3. Combine them, ensuring the active category is included
+    all_possible_categories = set(existing_categories)
+    all_possible_categories.add(active_category)
     
-    categories = sorted(list(set(video[4] for video in all_videos)))
-    if not categories:
-        bot.reply_to(message, "لا توجد فئات محددة.")
+    # Remove 'Uncategorized' if it has no videos and is not the active one, unless it's the only option
+    if len(all_possible_categories) > 1 and 'Uncategorized' not in existing_categories and active_category != 'Uncategorized':
+        all_possible_categories.discard('Uncategorized')
+
+    sorted_categories = sorted(list(all_possible_categories))
+
+    if not sorted_categories:
+        bot.reply_to(message, "لا توجد أي تصنيفات متاحة حالياً.")
         return
 
     keyboard = InlineKeyboardMarkup(row_width=2)
-    buttons = [InlineKeyboardButton(text=cat, callback_data=f"cat_{cat}_0") for cat in categories]
+    buttons = [InlineKeyboardButton(text=cat, callback_data=f"cat_{cat}_0") for cat in sorted_categories]
     keyboard.add(*buttons)
     bot.reply_to(message, "اختر فئة لعرض فيديوهاتها:", reply_markup=keyboard)
 
