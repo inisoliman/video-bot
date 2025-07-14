@@ -323,13 +323,14 @@ def list_videos(message, edit_message=None):
 def generate_admin_panel():
     """إنشاء لوحة تحكم الآدمن."""
     keyboard = InlineKeyboardMarkup(row_width=2)
-    btn1 = InlineKeyboardButton("📊 إحصائيات البوت", callback_data="admin_stats")
-    btn2 = InlineKeyboardButton("🔘 تعيين التصنيف النشط", callback_data="admin_set_active")
-    btn3 = InlineKeyboardButton("✏️ إعادة تسمية / نقل جماعي", callback_data="admin_rename")
-    btn4 = InlineKeyboardButton("🗑️ حذف تصنيف", callback_data="admin_delete")
-    btn5 = InlineKeyboardButton("↔️ نقل فيديو فردي", callback_data="admin_move_video")
-    btn6 = InlineKeyboardButton("ℹ️ عرض المساعدة", callback_data="admin_help")
-    keyboard.add(btn1, btn2, btn3, btn4, btn5, btn6)
+    btn_add = InlineKeyboardButton("➕ إضافة تصنيف جديد", callback_data="admin_add_new_cat")
+    btn_set_active = InlineKeyboardButton("🔘 تعيين التصنيف النشط", callback_data="admin_set_active")
+    btn_stats = InlineKeyboardButton("📊 إحصائيات البوت", callback_data="admin_stats")
+    btn_rename = InlineKeyboardButton("✏️ إعادة تسمية / نقل جماعي", callback_data="admin_rename")
+    btn_delete = InlineKeyboardButton("🗑️ حذف تصنيف", callback_data="admin_delete")
+    btn_move_video = InlineKeyboardButton("↔️ نقل فيديو فردي", callback_data="admin_move_video")
+    btn_help = InlineKeyboardButton("ℹ️ عرض المساعدة", callback_data="admin_help")
+    keyboard.add(btn_add, btn_set_active, btn_stats, btn_rename, btn_delete, btn_move_video, btn_help)
     return keyboard
 
 @bot.message_handler(commands=['admin'])
@@ -358,11 +359,11 @@ def check_cancel(message):
         return True
     return False
 
-def handle_set_active_category(message):
+def handle_add_new_category(message):
     if check_cancel(message): return
     category_name = message.text.strip()
     if set_active_category(category_name):
-        bot.reply_to(message, f"✅ تم تعيين التصنيف النشط بنجاح إلى '{category_name}'.")
+        bot.reply_to(message, f"✅ تم إنشاء وتفعيل التصنيف الجديد بنجاح: '{category_name}'.")
 
 def handle_rename_old(message):
     if check_cancel(message): return
@@ -438,28 +439,46 @@ def callback_query(call):
     """الاستجابة عند الضغط على الأزرار."""
     try:
         if call.data.startswith("admin_"):
-            action = call.data.split('_')[1]
-            bot.answer_callback_query(call.id)
+            action = call.data.split('_')
             
-            if action == "stats":
+            if action[1] == "stats":
                 video_count, category_count = get_bot_stats()
                 stats_text = f"📊 *إحصائيات البوت*\n\n- إجمالي الفيديوهات: *{video_count}*\n- إجمالي التصنيفات: *{category_count}*"
                 bot.send_message(call.message.chat.id, stats_text, parse_mode='Markdown')
-            elif action == "set_active":
-                msg = bot.send_message(call.message.chat.id, "أرسل اسم التصنيف الذي تريد تفعيله. (أو أرسل /cancel للإلغاء)")
-                bot.register_next_step_handler(msg, handle_set_active_category)
-            elif action == "rename":
+            
+            elif action[1] == "add" and action[2] == "new" and action[3] == "cat":
+                msg = bot.send_message(call.message.chat.id, "أرسل اسم التصنيف الجديد الذي تريد إنشاءه. (أو أرسل /cancel للإلغاء)")
+                bot.register_next_step_handler(msg, handle_add_new_category)
+
+            elif action[1] == "set" and action[2] == "active":
+                categories = get_all_distinct_categories()
+                if not categories:
+                    bot.answer_callback_query(call.id, "لا توجد تصنيفات حالياً. قم بإنشاء واحد أولاً.")
+                    return
+                keyboard = InlineKeyboardMarkup(row_width=2)
+                buttons = [InlineKeyboardButton(text=cat, callback_data=f"admin_setcat_{cat}") for cat in categories]
+                keyboard.add(*buttons)
+                bot.edit_message_text("اختر التصنيف الذي تريد تفعيله:", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+
+            elif action[1] == "setcat":
+                category_name = "_".join(action[2:])
+                if set_active_category(category_name):
+                    bot.edit_message_text(f"✅ تم تفعيل التصنيف '{category_name}' بنجاح.", call.message.chat.id, call.message.message_id)
+                
+            elif action[1] == "rename":
                 msg = bot.send_message(call.message.chat.id, "أرسل اسم التصنيف المصدر (القديم). (أو أرسل /cancel للإلغاء)")
                 bot.register_next_step_handler(msg, handle_rename_old)
-            elif action == "delete":
+            elif action[1] == "delete":
                 msg = bot.send_message(call.message.chat.id, "أرسل اسم التصنيف الذي تريد حذفه. (أو أرسل /cancel للإلغاء)")
                 bot.register_next_step_handler(msg, handle_delete_category)
-            elif action == "move_video":
+            elif action[1] == "move" and action[2] == "video":
                 msg = bot.send_message(call.message.chat.id, "قم بإعادة توجيه الفيديو الذي تريد نقله. (أو أرسل /cancel للإلغاء)")
                 bot.register_next_step_handler(msg, handle_move_video_forward)
-            elif action == "help":
+            elif action[1] == "help":
                 help_text = "قائمة أوامر الإدارة:\n- إحصائيات البوت\n- تعيين التصنيف النشط\n- إعادة تسمية / نقل جماعي\n- حذف تصنيف\n- نقل فيديو فردي"
                 bot.send_message(call.message.chat.id, help_text)
+            
+            bot.answer_callback_query(call.id)
             return
 
         if call.data == "back_to_cats":
