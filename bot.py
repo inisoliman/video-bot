@@ -222,7 +222,7 @@ def rename_category_in_db(old_name, new_name):
 
 # --- دوال مساعدة ---
 def create_paginated_keyboard(items, total_items, page, prefix, query_or_cat):
-    """إنشاء لوحة مفاتيح مع أزرار الصفحات."""
+    """إنشاء لوحة مفاتيح مع أزرار الصفحات وزر الرجوع."""
     keyboard = InlineKeyboardMarkup(row_width=1)
     
     for item in items:
@@ -242,6 +242,9 @@ def create_paginated_keyboard(items, total_items, page, prefix, query_or_cat):
             nav_buttons.append(InlineKeyboardButton("التالي ➡️", callback_data=f"{prefix}_{query_or_cat}_{page + 1}"))
         
         keyboard.row(*nav_buttons)
+    
+    # إضافة زر الرجوع إلى قائمة التصنيفات الرئيسية
+    keyboard.row(InlineKeyboardButton("الرجوع إلى التصنيفات", callback_data="back_to_cats"))
         
     return keyboard
 
@@ -262,32 +265,34 @@ def main_menu():
 def handle_list_videos_button(message):
     list_videos(message)
 
-def list_videos(message):
-    """عرض جميع الفئات المتاحة كأزرار، بما في ذلك التصنيف النشط."""
-    # 1. Get categories that already have videos
+def list_videos(message, edit_message=None):
+    """عرض جميع الفئات المتاحة كأزرار، مع إمكانية تعديل رسالة موجودة."""
     existing_categories = get_all_distinct_categories()
-
-    # 2. Get the currently active category
     active_category = get_active_category()
-
-    # 3. Combine them, ensuring the active category is included
     all_possible_categories = set(existing_categories)
     all_possible_categories.add(active_category)
     
-    # Remove 'Uncategorized' if it has no videos and is not the active one, unless it's the only option
     if len(all_possible_categories) > 1 and 'Uncategorized' not in existing_categories and active_category != 'Uncategorized':
         all_possible_categories.discard('Uncategorized')
 
     sorted_categories = sorted(list(all_possible_categories))
 
     if not sorted_categories:
-        bot.reply_to(message, "لا توجد أي تصنيفات متاحة حالياً.")
+        if edit_message:
+            bot.answer_callback_query(edit_message.id, "لا توجد أي تصنيفات متاحة حالياً.")
+        else:
+            bot.reply_to(message, "لا توجد أي تصنيفات متاحة حالياً.")
         return
 
     keyboard = InlineKeyboardMarkup(row_width=2)
     buttons = [InlineKeyboardButton(text=cat, callback_data=f"cat_{cat}_0") for cat in sorted_categories]
     keyboard.add(*buttons)
-    bot.reply_to(message, "اختر فئة لعرض فيديوهاتها:", reply_markup=keyboard)
+    
+    text = "اختر فئة لعرض فيديوهاتها:"
+    if edit_message:
+        bot.edit_message_text(text, edit_message.chat.id, edit_message.message_id, reply_markup=keyboard)
+    else:
+        bot.reply_to(message, text, reply_markup=keyboard)
 
 # --- أوامر الآدمن ---
 @bot.message_handler(commands=['help_admin'])
@@ -408,6 +413,11 @@ def handle_new_video(message):
 def callback_query(call):
     """الاستجابة عند الضغط على الأزرار."""
     try:
+        if call.data == "back_to_cats":
+            list_videos(call.message, edit_message=call.message)
+            bot.answer_callback_query(call.id)
+            return
+
         data = call.data.split('_')
         action = data[0]
 
@@ -417,7 +427,9 @@ def callback_query(call):
             bot.answer_callback_query(call.id, "جاري إرسال الفيديو...")
         
         elif action == "cat":
-            _, category, page_str = data
+            # The category name might contain underscores, so we join them back
+            category = "_".join(data[1:-1])
+            page_str = data[-1]
             page = int(page_str)
             videos, total_count = get_videos(category, page)
             keyboard = create_paginated_keyboard(videos, total_count, page, "cat", category)
