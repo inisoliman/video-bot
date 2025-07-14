@@ -120,33 +120,35 @@ def add_video(message_id, caption, chat_id, file_name, category_id):
     except Exception as e:
         print(f"Add video error: {e}")
 
-def get_videos(category_id=None, page=0):
-    """استرداد الفيديوهات من قاعدة البيانات مع نظام الصفحات."""
+def get_videos_and_subcategories(category_id=None, page=0):
+    """استرداد الفيديوهات والتصنيفات الفرعية من قاعدة البيانات مع نظام الصفحات."""
     offset = page * VIDEOS_PER_PAGE
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
+
+        # Get subcategories
+        c.execute("SELECT id, name FROM categories WHERE parent_id = %s ORDER BY name", (category_id,))
+        subcategories = c.fetchall()
+
+        # Get videos
+        c.execute("SELECT COUNT(*) FROM video_archive WHERE category_id = %s", (category_id,))
+        total_videos = c.fetchone()[0]
         
-        count_query = "SELECT COUNT(*) FROM video_archive WHERE category_id = %s"
-        data_query = """
+        c.execute("""
             SELECT v.message_id, v.caption, v.chat_id, v.file_name, c.name 
             FROM video_archive v
             JOIN categories c ON v.category_id = c.id
             WHERE v.category_id = %s
             ORDER BY v.id LIMIT %s OFFSET %s
-        """
-        
-        c.execute(count_query, (category_id,))
-        total_count = c.fetchone()[0]
-
-        c.execute(data_query, (category_id, VIDEOS_PER_PAGE, offset))
+        """, (category_id, VIDEOS_PER_PAGE, offset))
         videos = c.fetchall()
         
         conn.close()
-        return videos, total_count
+        return subcategories, videos, total_videos
     except Exception as e:
-        print(f"Get videos error: {e}")
-        return [], 0
+        print(f"Get content error: {e}")
+        return [], [], 0
         
 def get_all_categories_tree():
     """Gets all categories as a tree structure."""
