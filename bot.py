@@ -1,6 +1,6 @@
 # ==============================================================================
 # ملف: bot.py
-# الوصف: الإصدار النهائي مع لوحة تحكم متكاملة للآدمن.
+# الوصف: الإصدار النهائي مع لوحة تحكم متكاملة للآدمن وبحث متقدم.
 # ==============================================================================
 
 import telebot
@@ -420,13 +420,17 @@ def handle_text_search(message):
     if message.text.startswith('/'): return
     query = message.text.strip()
     
+    # Store the query to be used by callback handlers
+    user_last_search[message.chat.id] = query
+    
     categories = get_all_distinct_categories()
     keyboard = InlineKeyboardMarkup(row_width=1)
     
-    keyboard.add(InlineKeyboardButton("بحث في كل التصنيفات", callback_data=f"search_all::{query}::0"))
+    # Remove query from callback_data to prevent errors
+    keyboard.add(InlineKeyboardButton("بحث في كل التصنيفات", callback_data=f"search_scope::all"))
     
     for cat in categories:
-        keyboard.add(InlineKeyboardButton(f"بحث في: {cat}", callback_data=f"search_cat::{cat}::{query}::0"))
+        keyboard.add(InlineKeyboardButton(f"بحث في: {cat}", callback_data=f"search_scope::{cat}"))
         
     bot.reply_to(message, f"أين تريد البحث عن '{query}'؟", reply_markup=keyboard)
 
@@ -512,19 +516,53 @@ def callback_query(call):
             bot.edit_message_text(f"الفيديوهات في فئة '{category}':", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
             bot.answer_callback_query(call.id)
 
+        elif action == "search_scope":
+            bot.answer_callback_query(call.id)
+            query = user_last_search.get(call.message.chat.id)
+            if not query:
+                bot.edit_message_text("انتهت صلاحية البحث، يرجى البحث مرة أخرى.", call.message.chat.id, call.message.message_id)
+                return
+
+            scope = data[1]
+            page = 0 
+            
+            if scope == "all":
+                videos, total_count = search_videos(query, page=page)
+                if not videos:
+                    bot.edit_message_text(f"لم يتم العثور على نتائج للبحث الشامل عن '{query}'.", call.message.chat.id, call.message.message_id)
+                    return
+                keyboard = create_paginated_keyboard(videos, total_count, page, "search_all", "all")
+                bot.edit_message_text(f"نتائج البحث الشامل عن '{query}':", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+            else: 
+                category = scope
+                videos, total_count = search_videos(query, page=page, category=category)
+                if not videos:
+                    bot.edit_message_text(f"لم يتم العثور على نتائج للبحث عن '{query}' في فئة '{category}'.", call.message.chat.id, call.message.message_id)
+                    return
+                keyboard = create_paginated_keyboard(videos, total_count, page, "search_cat", category)
+                bot.edit_message_text(f"نتائج البحث عن '{query}' في فئة '{category}':", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+
         elif action == "search_all":
-            _, query, page_str = data
+            _, context, page_str = data
             page = int(page_str)
+            query = user_last_search.get(call.message.chat.id)
+            if not query:
+                bot.answer_callback_query(call.id, "انتهت صلاحية البحث، يرجى البحث مرة أخرى.")
+                return
             videos, total_count = search_videos(query, page=page)
-            keyboard = create_paginated_keyboard(videos, total_count, page, "search_all", query)
+            keyboard = create_paginated_keyboard(videos, total_count, page, "search_all", "all")
             bot.edit_message_text(f"نتائج البحث الشامل عن '{query}':", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
             bot.answer_callback_query(call.id)
 
         elif action == "search_cat":
-            _, category, query, page_str = data
+            _, category, page_str = data
             page = int(page_str)
+            query = user_last_search.get(call.message.chat.id)
+            if not query:
+                bot.answer_callback_query(call.id, "انتهت صلاحية البحث، يرجى البحث مرة أخرى.")
+                return
             videos, total_count = search_videos(query, page=page, category=category)
-            keyboard = create_paginated_keyboard(videos, total_count, page, f"search_cat::{category}", query)
+            keyboard = create_paginated_keyboard(videos, total_count, page, "search_cat", category)
             bot.edit_message_text(f"نتائج البحث عن '{query}' في فئة '{category}':", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
             bot.answer_callback_query(call.id)
         
