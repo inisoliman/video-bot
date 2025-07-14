@@ -1,6 +1,6 @@
 # ==============================================================================
 # ملف: bot.py
-# الوصف: الإصدار النهائي مع لوحة تحكم متكاملة للآدمن وبحث متقدم.
+# الوصف: الإصدار النهائي مع لوحة تحكم متكاملة للآدمن.
 # ==============================================================================
 
 import telebot
@@ -37,6 +37,7 @@ if DATABASE_URL:
 
 # قاموس مؤقت لتخزين بيانات عمليات الآدمن
 admin_steps = {}
+user_last_search = {} # لتخزين آخر عملية بحث لكل مستخدم
 VIDEOS_PER_PAGE = 10 # عدد الفيديوهات في كل صفحة
 CALLBACK_DELIMITER = '::' # فاصل آمن للبيانات
 
@@ -150,7 +151,6 @@ def search_videos(query, page=0, category=None):
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
         
-        # Normalize the query text in Python for safer SQL
         def normalize_text(text):
             text = text.replace('أ', 'ا').replace('إ', 'ا').replace('آ', 'ا')
             text = text.replace('ة', 'ه')
@@ -160,11 +160,9 @@ def search_videos(query, page=0, category=None):
         normalized_query = normalize_text(query)
         search_param = '%' + normalized_query + '%'
 
-        # Create a string of nested REPLACE functions for SQL
         def normalize_sql(column_name):
             return f"REPLACE(REPLACE(REPLACE(REPLACE(REPLACE({column_name}, 'أ', 'ا'), 'إ', 'ا'), 'آ', 'ا'), 'ة', 'ه'), 'ى', 'ي')"
 
-        # Build the WHERE clause
         where_clause = f"({normalize_sql('caption')} ILIKE %s OR {normalize_sql('file_name')} ILIKE %s)"
         params = [search_param, search_param]
 
@@ -425,10 +423,8 @@ def handle_text_search(message):
     categories = get_all_distinct_categories()
     keyboard = InlineKeyboardMarkup(row_width=1)
     
-    # Add search in all categories button
     keyboard.add(InlineKeyboardButton("بحث في كل التصنيفات", callback_data=f"search_all::{query}::0"))
     
-    # Add buttons for each category
     for cat in categories:
         keyboard.add(InlineKeyboardButton(f"بحث في: {cat}", callback_data=f"search_cat::{cat}::{query}::0"))
         
@@ -475,7 +471,7 @@ def callback_query(call):
                     bot.answer_callback_query(call.id, "لا توجد تصنيفات حالياً. قم بإنشاء واحد أولاً.")
                     return
                 keyboard = InlineKeyboardMarkup(row_width=2)
-                buttons = [InlineKeyboardButton(text=cat, callback_data=f"admin_setcat::{cat}") for cat in categories]
+                buttons = [InlineKeyboardButton(text=cat, callback_data=f"admin::setcat::{cat}") for cat in categories]
                 keyboard.add(*buttons)
                 bot.edit_message_text("اختر التصنيف الذي تريد تفعيله:", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
 
