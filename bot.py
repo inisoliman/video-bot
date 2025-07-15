@@ -1,5 +1,5 @@
 # ==============================================================================
-# ملف: bot_v7_final_fix.py
+# ملف: bot_v8_final_fix.py
 # الوصف: إصلاح نهائي لمشكلة إرسال الفيديو (400 Bad Request) عبر استراتيجية مزدوجة.
 # ==============================================================================
 
@@ -701,9 +701,9 @@ def callback_query(call):
                     reply_markup=keyboard
                 )
                 bot.answer_callback_query(call.id)
-            except telebot.apihelper.ApiHTTPException as e:
+            except telebot.apihelper.ApiTelegramException as e:
                 # الخطة البديلة: إذا كان الوصف طويلاً جداً
-                if 'caption is too long' in str(e):
+                if 'caption is too long' in e.description:
                     print("Caption is too long, falling back to send_video.")
                     bot.answer_callback_query(call.id, "الوصف طويل، جاري إرسال نسخة مختصرة...")
                     video_details = get_video_details(message_id)
