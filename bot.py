@@ -1,6 +1,6 @@
 # ==============================================================================
-# ملف: bot_v5_final.py
-# الوصف: نسخة نهائية مع ميزات عرض "الأكثر تقييماً" و "الأكثر بحثاً".
+# ملف: bot_v6_fixed.py
+# الوصف: نسخة مُصححة تعالج خطأ طول الوصف وخطأ إنشاء جدول البحث.
 # ==============================================================================
 
 import telebot
@@ -47,7 +47,6 @@ def init_db():
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
-        # جدول الأرشيف
         c.execute('''
             CREATE TABLE IF NOT EXISTS video_archive (
                 id SERIAL PRIMARY KEY,
@@ -59,14 +58,12 @@ def init_db():
                 file_id TEXT
             )
         ''')
-        # جدول الإعدادات
         c.execute('''
             CREATE TABLE IF NOT EXISTS bot_settings (
                 setting_key TEXT PRIMARY KEY,
                 setting_value TEXT
             )
         ''')
-        # جدول المستخدمين
         c.execute('''
             CREATE TABLE IF NOT EXISTS bot_users (
                 user_id BIGINT PRIMARY KEY,
@@ -75,7 +72,6 @@ def init_db():
                 join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        # جدول التقييمات
         c.execute('''
             CREATE TABLE IF NOT EXISTS video_ratings (
                 rating_id SERIAL PRIMARY KEY,
@@ -85,7 +81,6 @@ def init_db():
                 UNIQUE (message_id, user_id)
             )
         ''')
-        # --- جديد: جدول سجل البحث ---
         c.execute('''
             CREATE TABLE IF NOT EXISTS search_log (
                 log_id SERIAL PRIMARY KEY,
@@ -94,7 +89,6 @@ def init_db():
                 search_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        # التأكد من وجود عمود file_id
         try:
             c.execute("ALTER TABLE video_archive ADD COLUMN file_id TEXT;")
             print("Database schema updated: Added 'file_id' column.")
@@ -106,10 +100,7 @@ def init_db():
     except Exception as e:
         print(f"Database error during init: {e}")
 
-# --- دوال جديدة: لجلب الأكثر بحثاً وتقييماً ---
-
 def log_search_query(query, user_id):
-    """تسجيل عملية البحث في قاعدة البيانات."""
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
@@ -120,17 +111,14 @@ def log_search_query(query, user_id):
         print(f"Log search error: {e}")
 
 def get_most_searched_terms(limit=10):
-    """الحصول على أكثر الكلمات بحثاً."""
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
-        # جلب آخر 200 عملية بحث لتكون النتائج حديثة ومتغيرة
         c.execute("SELECT query_text FROM search_log ORDER BY log_id DESC LIMIT 200")
         queries = [row[0].strip().lower() for row in c.fetchall()]
         conn.close()
         if not queries:
             return []
-        # حساب التكرار وإرجاع الأكثر شيوعاً
         count = Counter(queries)
         return count.most_common(limit)
     except Exception as e:
@@ -138,16 +126,12 @@ def get_most_searched_terms(limit=10):
         return []
 
 def get_top_rated_videos(page=0):
-    """الحصول على الفيديوهات الأعلى تقييماً."""
     offset = page * VIDEOS_PER_PAGE
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
-        # استعلام لجلب عدد الفيديوهات المقيمة
         c.execute("SELECT COUNT(DISTINCT r.message_id) FROM video_ratings r JOIN video_archive v ON r.message_id = v.message_id")
         total_count = c.fetchone()[0]
-        
-        # استعلام لجلب الفيديوهات مرتبة حسب مجموع التقييمات
         query = """
             SELECT v.message_id, v.caption, v.chat_id, v.file_name, v.category, v.file_id, SUM(r.rating) as score
             FROM video_archive v
@@ -163,9 +147,20 @@ def get_top_rated_videos(page=0):
     except Exception as e:
         print(f"Get top rated videos error: {e}")
         return [], 0
+        
+def get_video_details(message_id):
+    """(جديد) دالة لجلب تفاصيل فيديو محدد لتجنب خطأ طول الوصف."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        c = conn.cursor()
+        c.execute("SELECT file_id, caption FROM video_archive WHERE message_id = %s", (message_id,))
+        result = c.fetchone()
+        conn.close()
+        return result
+    except Exception as e:
+        print(f"Get video details error: {e}")
+        return None
 
-
-# --- باقي دوال قاعدة البيانات (بدون تغيير) ---
 def add_bot_user(user_id, username, first_name):
     try:
         conn = psycopg2.connect(**DB_CONFIG)
@@ -392,7 +387,7 @@ def get_video_ratings(message_id):
 def create_rating_keyboard(message_id, chat_id):
     score = get_video_ratings(message_id)
     keyboard = InlineKeyboardMarkup()
-    like_button = InlineKeyboardButton(f"👍", callback_data=f"rate::{message_id}::{chat_id}::1")
+    like_button = InlineKeyboardButton(f"�", callback_data=f"rate::{message_id}::{chat_id}::1")
     dislike_button = InlineKeyboardButton(f"👎", callback_data=f"rate::{message_id}::{chat_id}::-1")
     score_button = InlineKeyboardButton(f"التقييم: {score}", callback_data="noop")
     keyboard.row(like_button, score_button, dislike_button)
@@ -401,7 +396,6 @@ def create_rating_keyboard(message_id, chat_id):
 def create_paginated_keyboard(items, total_items, page, prefix, context, show_score=False):
     keyboard = InlineKeyboardMarkup(row_width=1)
     for item in items:
-        # فك متغيرات الفيديو، مع التعامل مع وجود score اختيارياً
         score = None
         if show_score:
             message_id, caption, chat_id, file_name, category, file_id, score = item
@@ -411,7 +405,7 @@ def create_paginated_keyboard(items, total_items, page, prefix, context, show_sc
         title = caption or file_name or "فيديو بدون عنوان"
         display_text = f"{title[:40]}"
         if show_score:
-            display_text += f" (التقييم: {score})" # عرض التقييم
+            display_text += f" (التقييم: {score})"
         
         keyboard.add(InlineKeyboardButton(text=display_text, callback_data=f"video::{message_id}::{chat_id}"))
 
@@ -425,7 +419,6 @@ def create_paginated_keyboard(items, total_items, page, prefix, context, show_sc
             nav_buttons.append(InlineKeyboardButton("التالي ➡️", callback_data=f"{prefix}::{context}::{page + 1}"))
         keyboard.row(*nav_buttons)
     
-    # زر الرجوع للقائمة الرئيسية بدلاً من التصنيفات في بعض الحالات
     if prefix in ["top_rated", "most_searched_results"]:
          keyboard.row(InlineKeyboardButton("العودة للقائمة الرئيسية", callback_data="back_to_main"))
     else:
@@ -433,7 +426,6 @@ def create_paginated_keyboard(items, total_items, page, prefix, context, show_sc
     return keyboard
 
 def main_menu():
-    """(محدث) إنشاء القائمة الرئيسية مع الأزرار الجديدة."""
     markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     btn1 = KeyboardButton('🎬 عرض التصنيفات')
     btn2 = KeyboardButton('⭐ الأكثر تقييماً')
@@ -446,7 +438,7 @@ def generate_admin_panel():
     buttons = [
         InlineKeyboardButton("📢 بث رسالة", callback_data="admin::broadcast"),
         InlineKeyboardButton("👤 عدد المشتركين", callback_data="admin::sub_count"),
-        InlineKeyboardButton("� إحصائيات المحتوى", callback_data="admin::stats"),
+        InlineKeyboardButton("📊 إحصائيات المحتوى", callback_data="admin::stats"),
         InlineKeyboardButton("➕ إضافة تصنيف", callback_data="admin::add_new_cat"),
         InlineKeyboardButton("🔘 تعيين النشط", callback_data="admin::set_active"),
         InlineKeyboardButton("✏️ إعادة تسمية", callback_data="admin::rename"),
@@ -490,7 +482,6 @@ def check_cancel(message):
         return True
     return False
 
-# --- معالجات خطوات الآدمن (بدون تغيير) ---
 def setup_step_handler(message, next_handler_func):
     chat_id = message.chat.id
     admin_steps[chat_id] = True
@@ -574,7 +565,6 @@ def handle_list_videos_button(message):
 
 @bot.message_handler(func=lambda message: message.text == '⭐ الأكثر تقييماً')
 def handle_top_rated_button(message):
-    """يعرض قائمة الفيديوهات الأعلى تقييماً."""
     videos, total_count = get_top_rated_videos(page=0)
     if not videos:
         bot.reply_to(message, "لا توجد فيديوهات مقيمة لعرضها حالياً.")
@@ -584,7 +574,6 @@ def handle_top_rated_button(message):
 
 @bot.message_handler(func=lambda message: message.text == '📈 الأكثر بحثاً')
 def handle_most_searched_button(message):
-    """يعرض قائمة بالكلمات الأكثر بحثاً."""
     terms = get_most_searched_terms()
     if not terms:
         bot.reply_to(message, "لا توجد عمليات بحث مسجلة لعرضها.")
@@ -615,7 +604,7 @@ def handle_text_search(message):
     if message.text.startswith('/'): return
     query = message.text.strip()
     user_last_search[message.chat.id] = query
-    log_search_query(query, message.from_user.id) # تسجيل البحث
+    log_search_query(query, message.from_user.id)
     categories = get_all_distinct_categories()
     keyboard = InlineKeyboardMarkup(row_width=1)
     keyboard.add(InlineKeyboardButton("بحث في كل التصنيفات", callback_data=f"search_scope::all"))
@@ -699,10 +688,18 @@ def callback_query(call):
             except Exception: pass
         
         elif action == "video":
-            _, message_id, chat_id = data
-            keyboard = create_rating_keyboard(int(message_id), int(chat_id))
-            bot.copy_message(call.message.chat.id, chat_id, int(message_id), reply_markup=keyboard)
-            bot.answer_callback_query(call.id, "جاري إرسال الفيديو...")
+            # --- (مُصحح) استخدام send_video بدلاً من copy_message ---
+            _, message_id_str, chat_id_str = data
+            message_id = int(message_id_str)
+            video_details = get_video_details(message_id)
+            if video_details:
+                file_id, caption = video_details
+                keyboard = create_rating_keyboard(message_id, int(chat_id_str))
+                safe_caption = (caption[:1020] + '...') if len(caption) > 1023 else caption
+                bot.send_video(call.message.chat.id, file_id, caption=safe_caption, reply_markup=keyboard)
+                bot.answer_callback_query(call.id, "جاري إرسال الفيديو...")
+            else:
+                bot.answer_callback_query(call.id, "عذراً، لم أتمكن من العثور على هذا الفيديو.", show_alert=True)
 
         elif action == "cat":
             _, category, page_str = data
@@ -789,7 +786,7 @@ def callback_query(call):
 def inline_query_handler(inline_query):
     try:
         query = inline_query.query
-        log_search_query(query, inline_query.from_user.id) # تسجيل البحث
+        log_search_query(query, inline_query.from_user.id)
         results, _ = search_videos(query, page=0)
         inline_results = []
         for item in results:
@@ -814,7 +811,7 @@ def inline_query_handler(inline_query):
 
 if __name__ == "__main__":
     init_db()
-    print("Bot is starting (Final Version with Stats)...")
+    print("Bot is starting (Fixed & Final Version)...")
     while True:
         try:
             bot.polling(non_stop=True)
