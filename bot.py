@@ -1,6 +1,6 @@
 # ==============================================================================
 # ملف: bot.py
-# الوصف: الإصدار النهائي مع لوحة تحكم متكاملة للآدمن وبحث متقدم.
+# الوصف: الإصدار النهائي مع لوحة تحكم متكاملة للآدمن وميزة البث.
 # ==============================================================================
 
 import telebot
@@ -93,6 +93,19 @@ def add_bot_user(user_id, username, first_name):
         conn.close()
     except Exception as e:
         print(f"Add bot user error: {e}")
+
+def get_all_user_ids():
+    """الحصول على جميع معرفات المستخدمين للبث."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        c = conn.cursor()
+        c.execute("SELECT user_id FROM bot_users")
+        user_ids = [row[0] for row in c.fetchall()]
+        conn.close()
+        return user_ids
+    except Exception as e:
+        print(f"Get all user IDs error: {e}")
+        return []
 
 def get_subscriber_count():
     """الحصول على العدد الإجمالي للمشتركين."""
@@ -324,7 +337,6 @@ def create_paginated_keyboard(items, total_items, page, prefix, context):
 
 @bot.message_handler(commands=['start'])
 def start(message):
-    # تسجيل المستخدم عند أول تفاعل
     add_bot_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
     bot.reply_to(message, "أهلاً بك في بوت البحث عن الفيديوهات!", reply_markup=main_menu())
 
@@ -369,6 +381,7 @@ def list_videos(message, edit_message=None):
 def generate_admin_panel():
     """إنشاء لوحة تحكم الآدمن."""
     keyboard = InlineKeyboardMarkup(row_width=2)
+    btn_broadcast = InlineKeyboardButton("📢 إرسال رسالة للجميع", callback_data="admin::broadcast")
     btn_subs = InlineKeyboardButton("👤 عدد المشتركين", callback_data="admin::sub_count")
     btn_stats = InlineKeyboardButton("📊 إحصائيات المحتوى", callback_data="admin::stats")
     btn_add = InlineKeyboardButton("➕ إضافة تصنيف جديد", callback_data="admin::add_new_cat")
@@ -377,7 +390,7 @@ def generate_admin_panel():
     btn_delete = InlineKeyboardButton("🗑️ حذف تصنيف", callback_data="admin::delete")
     btn_move_video = InlineKeyboardButton("↔️ نقل فيديو فردي", callback_data="admin::move_video")
     btn_help = InlineKeyboardButton("ℹ️ عرض المساعدة", callback_data="admin::help")
-    keyboard.add(btn_subs, btn_stats, btn_add, btn_set_active, btn_rename, btn_delete, btn_move_video, btn_help)
+    keyboard.add(btn_broadcast, btn_subs, btn_stats, btn_add, btn_set_active, btn_rename, btn_delete, btn_move_video, btn_help)
     return keyboard
 
 @bot.message_handler(commands=['admin'])
@@ -405,6 +418,26 @@ def check_cancel(message):
         bot.send_message(message.chat.id, "✅ تم إلغاء العملية الحالية بنجاح.")
         return True
     return False
+
+def handle_broadcast_message(message):
+    if check_cancel(message): return
+    broadcast_text = message.text
+    user_ids = get_all_user_ids()
+    sent_count = 0
+    failed_count = 0
+    
+    bot.send_message(message.chat.id, f"بدء إرسال الرسالة إلى {len(user_ids)} مشترك. قد تستغرق هذه العملية بعض الوقت...")
+    
+    for user_id in user_ids:
+        try:
+            bot.send_message(user_id, broadcast_text)
+            sent_count += 1
+        except Exception as e:
+            failed_count += 1
+            print(f"Failed to send to {user_id}: {e}")
+        time.sleep(0.1) # لتجنب تجاوز حدود تليجرام
+        
+    bot.send_message(message.chat.id, f"✅ اكتمل البث!\n\n- رسائل ناجحة: {sent_count}\n- رسائل فاشلة: {failed_count}")
 
 def handle_add_new_category(message):
     if check_cancel(message): return
@@ -498,7 +531,11 @@ def callback_query(call):
             sub_action = data[1]
             bot.answer_callback_query(call.id)
             
-            if sub_action == "sub_count":
+            if sub_action == "broadcast":
+                msg = bot.send_message(call.message.chat.id, "أرسل الرسالة التي تريد بثها لجميع المشتركين. (أو أرسل /cancel للإلغاء)")
+                bot.register_next_step_handler(msg, handle_broadcast_message)
+
+            elif sub_action == "sub_count":
                 count = get_subscriber_count()
                 bot.send_message(call.message.chat.id, f"👤 إجمالي عدد المشتركين في البوت: *{count}*", parse_mode='Markdown')
             
