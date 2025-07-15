@@ -1,13 +1,13 @@
 # ==============================================================================
-# ملف: bot_v8_final_fix.py
-# الوصف: إصلاح نهائي لمشكلة إرسال الفيديو (400 Bad Request) عبر استراتيجية مزدوجة.
+# ملف: bot_v10_stable.py
+# الوصف: نسخة مستقرة مع إزالة Inline Mode غير المتوافق مع القنوات الخاصة.
 # ==============================================================================
 
 import telebot
 import psycopg2
 import os
 import time
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, InlineQueryResultVideo
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from urllib.parse import urlparse
 import math
 import uuid
@@ -18,7 +18,6 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 DATABASE_URL = os.getenv('DATABASE_URL')
 CHANNEL_ID = os.getenv('CHANNEL_ID')
 ADMIN_ID = os.getenv('ADMIN_ID')
-DEFAULT_THUMB_URL = "https://via.placeholder.com/150.jpg?text=Video"
 
 if not all([BOT_TOKEN, DATABASE_URL, CHANNEL_ID, ADMIN_ID]):
     print("FATAL ERROR: Missing one or more environment variables.")
@@ -704,13 +703,30 @@ def callback_query(call):
             except telebot.apihelper.ApiTelegramException as e:
                 # الخطة البديلة: إذا كان الوصف طويلاً جداً
                 if 'caption is too long' in e.description:
-                    print("Caption is too long, falling back to send_video.")
-                    bot.answer_callback_query(call.id, "الوصف طويل، جاري إرسال نسخة مختصرة...")
+                    print("Caption is too long, falling back to sending a link.")
+                    bot.answer_callback_query(call.id, "الوصف طويل جداً، سيتم إرسال رابط مباشر للفيديو.")
+                    
                     video_details = get_video_details(message_id)
                     if video_details:
-                        file_id, caption = video_details
-                        safe_caption = (caption[:1020] + '...') if caption and len(caption) > 1023 else caption
-                        bot.send_video(call.message.chat.id, file_id, caption=safe_caption, reply_markup=keyboard)
+                        _, caption = video_details
+                        safe_caption = (caption[:900] + '...') if caption and len(caption) > 900 else caption
+                        
+                        # إنشاء رابط مباشر للرسالة في القناة
+                        channel_id_for_link = str(from_chat_id)
+                        if channel_id_for_link.startswith('-100'):
+                            channel_id_for_link = channel_id_for_link[4:]
+                        
+                        video_url = f"https://t.me/c/{channel_id_for_link}/{message_id}"
+                        
+                        link_keyboard = InlineKeyboardMarkup()
+                        link_keyboard.add(InlineKeyboardButton("🎬 مشاهدة الفيديو في القناة", url=video_url))
+                        
+                        bot.send_message(
+                            call.message.chat.id, 
+                            f"عذراً، وصف هذا الفيديو طويل جداً.\n\n*بداية الوصف:*\n{safe_caption}\n\nيمكنك مشاهدة الفيديو مباشرة من خلال الرابط أدناه:",
+                            reply_markup=link_keyboard,
+                            parse_mode='Markdown'
+                        )
                     else:
                         bot.send_message(call.message.chat.id, "عذراً، لم أتمكن من العثور على تفاصيل هذا الفيديو.")
                 else:
@@ -798,38 +814,12 @@ def callback_query(call):
             bot.answer_callback_query(call.id, "حدث خطأ ما.", show_alert=True)
         except: pass
 
-# --- معالج البحث المباشر ---
-
-@bot.inline_handler(lambda query: len(query.query) > 2)
-def inline_query_handler(inline_query):
-    try:
-        query = inline_query.query
-        log_search_query(query, inline_query.from_user.id)
-        results, _ = search_videos(query, page=0)
-        inline_results = []
-        for item in results:
-            message_id, caption, chat_id, file_name, category, file_id = item
-            if not file_id: continue
-            title = caption or file_name or "فيديو بدون عنوان"
-            r = InlineQueryResultVideo(
-                id=str(uuid.uuid4()),
-                video_file_id=file_id,
-                title=title,
-                caption=f"{title}\n\nالتصنيف: {category}",
-                mime_type='video/mp4',
-                thumb_url=DEFAULT_THUMB_URL,
-                reply_markup=create_rating_keyboard(message_id, chat_id)
-            )
-            inline_results.append(r)
-        bot.answer_inline_query(inline_query.id, inline_results, cache_time=1)
-    except Exception as e:
-        print(f"Inline query error: {e}")
 
 # --- نقطة انطلاق البوت ---
 
 if __name__ == "__main__":
     init_db()
-    print("Bot is starting (Final Fix Version)...")
+    print("Bot is starting (Stable Version)...")
     while True:
         try:
             bot.polling(non_stop=True)
