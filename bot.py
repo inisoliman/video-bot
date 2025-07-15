@@ -1,6 +1,6 @@
 # ==============================================================================
-# ملف: bot_v6_fixed.py
-# الوصف: نسخة مُصححة تعالج خطأ طول الوصف وخطأ إنشاء جدول البحث.
+# ملف: bot_v7_final_fix.py
+# الوصف: إصلاح نهائي لمشكلة إرسال الفيديو (400 Bad Request) عبر استراتيجية مزدوجة.
 # ==============================================================================
 
 import telebot
@@ -149,7 +149,6 @@ def get_top_rated_videos(page=0):
         return [], 0
         
 def get_video_details(message_id):
-    """(جديد) دالة لجلب تفاصيل فيديو محدد لتجنب خطأ طول الوصف."""
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
@@ -387,7 +386,7 @@ def get_video_ratings(message_id):
 def create_rating_keyboard(message_id, chat_id):
     score = get_video_ratings(message_id)
     keyboard = InlineKeyboardMarkup()
-    like_button = InlineKeyboardButton(f"�", callback_data=f"rate::{message_id}::{chat_id}::1")
+    like_button = InlineKeyboardButton(f"👍", callback_data=f"rate::{message_id}::{chat_id}::1")
     dislike_button = InlineKeyboardButton(f"👎", callback_data=f"rate::{message_id}::{chat_id}::-1")
     score_button = InlineKeyboardButton(f"التقييم: {score}", callback_data="noop")
     keyboard.row(like_button, score_button, dislike_button)
@@ -688,18 +687,37 @@ def callback_query(call):
             except Exception: pass
         
         elif action == "video":
-            # --- (مُصحح) استخدام send_video بدلاً من copy_message ---
-            _, message_id_str, chat_id_str = data
+            _, message_id_str, from_chat_id_str = data
             message_id = int(message_id_str)
-            video_details = get_video_details(message_id)
-            if video_details:
-                file_id, caption = video_details
-                keyboard = create_rating_keyboard(message_id, int(chat_id_str))
-                safe_caption = (caption[:1020] + '...') if len(caption) > 1023 else caption
-                bot.send_video(call.message.chat.id, file_id, caption=safe_caption, reply_markup=keyboard)
-                bot.answer_callback_query(call.id, "جاري إرسال الفيديو...")
-            else:
-                bot.answer_callback_query(call.id, "عذراً، لم أتمكن من العثور على هذا الفيديو.", show_alert=True)
+            from_chat_id = int(from_chat_id_str)
+            keyboard = create_rating_keyboard(message_id, from_chat_id)
+
+            try:
+                # المحاولة الأولى: الطريقة الأكثر موثوقية
+                bot.copy_message(
+                    chat_id=call.message.chat.id,
+                    from_chat_id=from_chat_id,
+                    message_id=message_id,
+                    reply_markup=keyboard
+                )
+                bot.answer_callback_query(call.id)
+            except telebot.apihelper.ApiHTTPException as e:
+                # الخطة البديلة: إذا كان الوصف طويلاً جداً
+                if 'caption is too long' in str(e):
+                    print("Caption is too long, falling back to send_video.")
+                    bot.answer_callback_query(call.id, "الوصف طويل، جاري إرسال نسخة مختصرة...")
+                    video_details = get_video_details(message_id)
+                    if video_details:
+                        file_id, caption = video_details
+                        safe_caption = (caption[:1020] + '...') if caption and len(caption) > 1023 else caption
+                        bot.send_video(call.message.chat.id, file_id, caption=safe_caption, reply_markup=keyboard)
+                    else:
+                        bot.send_message(call.message.chat.id, "عذراً، لم أتمكن من العثور على تفاصيل هذا الفيديو.")
+                else:
+                    # لأي خطأ آخر غير متوقع
+                    print(f"Unexpected API error on copy_message: {e}")
+                    bot.answer_callback_query(call.id, "حدث خطأ غير متوقع عند إرسال الفيديو.", show_alert=True)
+
 
         elif action == "cat":
             _, category, page_str = data
@@ -811,7 +829,7 @@ def inline_query_handler(inline_query):
 
 if __name__ == "__main__":
     init_db()
-    print("Bot is starting (Fixed & Final Version)...")
+    print("Bot is starting (Final Fix Version)...")
     while True:
         try:
             bot.polling(non_stop=True)
