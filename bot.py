@@ -1,5 +1,5 @@
 # ==============================================================================
-# ملف: bot.py (النسخة المصححة نهائياً مع تحسينات الترحيل)
+# ملف: bot.py (النسخة النهائية المصححة مع ترحيل قوي ومعالجة أخطاء محسنة)
 # الوصف: النسخة المطورة من البوت مع التصنيفات الشجرية واختيار الجودة والبث الغني
 #        مع تصحيحات شاملة لهيكل قاعدة البيانات وعملية الترحيل والتقييمات.
 # ==============================================================================
@@ -72,7 +72,8 @@ def init_db():
                 file_name TEXT,
                 category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
                 metadata JSONB DEFAULT '{}'::jsonb,
-                view_count INTEGER DEFAULT 0
+                view_count INTEGER DEFAULT 0,
+                file_id TEXT
             )
         """)
         
@@ -119,31 +120,64 @@ def init_db():
         print(f"Database error during init: {e}")
 
 def migrate_old_data():
-    """ترحيل البيانات القديمة من النظام القديم إلى النظام الجديد."""
+    """ترحيل البيانات القديمة من النظام القديم إلى النظام الجديد - نسخة محسنة."""
+    conn = None
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
         
-        print("Starting migration process...")
+        print("Starting enhanced migration process...")
         
         # إضافة الأعمدة الجديدة إذا لم تكن موجودة
         try:
             c.execute("ALTER TABLE video_archive ADD COLUMN IF NOT EXISTS category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL")
-            print("Added category_id column if not exists")
+            print("✓ Added category_id column if not exists")
         except Exception as e:
             print(f"Error adding category_id column: {e}")
         
         try:
             c.execute("ALTER TABLE video_archive ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb")
-            print("Added metadata column if not exists")
+            print("✓ Added metadata column if not exists")
         except Exception as e:
             print(f"Error adding metadata column: {e}")
         
         try:
             c.execute("ALTER TABLE video_archive ADD COLUMN IF NOT EXISTS view_count INTEGER DEFAULT 0")
-            print("Added view_count column if not exists")
+            print("✓ Added view_count column if not exists")
         except Exception as e:
             print(f"Error adding view_count column: {e}")
+
+        try:
+            c.execute("ALTER TABLE video_archive ADD COLUMN IF NOT EXISTS file_id TEXT")
+            print("✓ Added file_id column if not exists")
+        except Exception as e:
+            print(f"Error adding file_id column: {e}")
+
+        # إنشاء تصنيف افتراضي في بداية الترحيل لضمان وجوده
+        default_category_name = "Uncategorized"
+        full_path = f"/{default_category_name}/"
+        try:
+            c.execute("""
+                INSERT INTO categories (name, parent_id, full_path)
+                VALUES (%s, NULL, %s)
+                ON CONFLICT (full_path) DO NOTHING
+                RETURNING id
+            """, (default_category_name, full_path))
+            
+            result = c.fetchone()
+            if result:
+                default_category_id = result[0]
+                print(f"✓ Created default category with ID: {default_category_id}")
+            else:
+                # إذا كان التصنيف موجود بالفعل، احصل على معرفه
+                c.execute("SELECT id FROM categories WHERE full_path = %s", (full_path,))
+                default_category_id = c.fetchone()[0]
+                print(f"✓ Found existing default category with ID: {default_category_id}")
+        except Exception as e:
+            print(f"Error creating default category: {e}")
+            # في حالة فشل إنشاء التصنيف الافتراضي، توقف عن الترحيل
+            conn.rollback()
+            return
 
         # التحقق من وجود عمود category القديم في video_archive
         c.execute("""
@@ -160,7 +194,7 @@ def migrate_old_data():
             old_categories = [row[0] for row in c.fetchall()]
             print(f"Found {len(old_categories)} unique categories to migrate: {old_categories}")
 
-            # إنشاء التصنيفات في الجدول الجديد
+            # إنشاء التصنيفات في الجدول الجديد مع معالجة الأخطاء لكل تصنيف
             for cat_name in old_categories:
                 full_path = f"/{cat_name}/"
                 try:
@@ -168,79 +202,84 @@ def migrate_old_data():
                         INSERT INTO categories (name, parent_id, full_path)
                         VALUES (%s, NULL, %s)
                         ON CONFLICT (full_path) DO NOTHING
+                        RETURNING id
                     """, (cat_name, full_path))
-                    print(f"Created category: {cat_name}")
+                    result = c.fetchone()
+                    if result:
+                        print(f"✓ Created category: {cat_name} with ID: {result[0]}")
+                    else:
+                        print(f"✓ Category already exists: {cat_name}")
                 except Exception as e:
-                    print(f"Error creating category {cat_name}: {e}")
+                    print(f"✗ Error creating category {cat_name}: {e}")
+                    # لا نتوقف، نستمر مع التصنيفات الأخرى
 
             # تحديث جدول video_archive لاستخدام category_id
-            c.execute("""
-                UPDATE video_archive 
-                SET category_id = categories.id
-                FROM categories
-                WHERE video_archive.category = categories.name
-                AND video_archive.category_id IS NULL
-            """)
-            
-            # التحقق من عدد الفيديوهات التي تم ترحيلها
-            c.execute("SELECT COUNT(*) FROM video_archive WHERE category_id IS NOT NULL")
-            migrated_count = c.fetchone()[0]
-            print(f"Migrated {migrated_count} videos to new category system")
+            try:
+                c.execute("""
+                    UPDATE video_archive 
+                    SET category_id = categories.id
+                    FROM categories
+                    WHERE video_archive.category = categories.name
+                    AND video_archive.category_id IS NULL
+                """)
+                
+                # التحقق من عدد الفيديوهات التي تم ترحيلها
+                c.execute("SELECT COUNT(*) FROM video_archive WHERE category_id IS NOT NULL")
+                migrated_count = c.fetchone()[0]
+                print(f"✓ Migrated {migrated_count} videos to new category system")
+            except Exception as e:
+                print(f"✗ Error updating video_archive with category_id: {e}")
 
             # حذف عمود category القديم بعد الترحيل
             try:
-                c.execute("ALTER TABLE video_archive DROP COLUMN category")
-                print("Successfully dropped old category column")
+                c.execute("ALTER TABLE video_archive DROP COLUMN IF EXISTS category")
+                print("✓ Successfully dropped old category column")
             except Exception as e:
-                print(f"Error dropping old category column: {e}")
-            
-            conn.commit()
-            print("Migration completed successfully.")
+                print(f"✗ Error dropping old category column: {e}")
         else:
-            print("No old category column found in video_archive, checking if migration is needed...")
-            
-            # التحقق من وجود فيديوهات بدون category_id
-            c.execute("SELECT COUNT(*) FROM video_archive WHERE category_id IS NULL")
-            orphaned_videos = c.fetchone()[0]
-            
-            if orphaned_videos > 0:
-                print(f"Found {orphaned_videos} videos without category_id, creating default category...")
-                
-                # إنشاء تصنيف افتراضي إذا لم يوجد
-                default_category_name = "Uncategorized"
-                full_path = f"/{default_category_name}/"
-                
-                c.execute("""
-                    INSERT INTO categories (name, parent_id, full_path)
-                    VALUES (%s, NULL, %s)
-                    ON CONFLICT (full_path) DO NOTHING
-                    RETURNING id
-                """, (default_category_name, full_path))
-                
-                result = c.fetchone()
-                if result:
-                    default_category_id = result[0]
-                else:
-                    # إذا كان التصنيف موجود بالفعل، احصل على معرفه
-                    c.execute("SELECT id FROM categories WHERE full_path = %s", (full_path,))
-                    default_category_id = c.fetchone()[0]
-                
-                # تحديث الفيديوهات اليتيمة
+            print("No old category column found in video_archive")
+        
+        # التحقق من الفيديوهات بدون category_id وتعيين التصنيف الافتراضي
+        c.execute("SELECT COUNT(*) FROM video_archive WHERE category_id IS NULL")
+        orphaned_videos = c.fetchone()[0]
+        if orphaned_videos > 0:
+            print(f"Found {orphaned_videos} videos without category_id, assigning to default category...")
+            try:
                 c.execute("""
                     UPDATE video_archive 
                     SET category_id = %s 
                     WHERE category_id IS NULL
                 """, (default_category_id,))
-                
-                conn.commit()
-                print(f"Assigned {orphaned_videos} orphaned videos to default category")
+                print(f"✓ Assigned {orphaned_videos} orphaned videos to default category ID: {default_category_id}")
+            except Exception as e:
+                print(f"✗ Error assigning orphaned videos: {e}")
+
+        # التأكد من وجود active_category_id في bot_settings
+        try:
+            c.execute("SELECT setting_value FROM bot_settings WHERE setting_key = 'active_category_id'")
+            if not c.fetchone():
+                c.execute("""
+                    INSERT INTO bot_settings (setting_key, setting_value)
+                    VALUES ('active_category_id', %s)
+                    ON CONFLICT (setting_key) DO UPDATE SET setting_value = EXCLUDED.setting_value
+                """, (str(default_category_id),))
+                print(f"✓ Set active_category_id to default category ID: {default_category_id}")
             else:
-                print("No orphaned videos found, migration not needed")
-            
-        conn.close()
-        print("Migration process completed.")
+                print("✓ active_category_id already exists in bot_settings")
+        except Exception as e:
+            print(f"✗ Error setting active_category_id: {e}")
+
+        conn.commit()
+        print("✅ Migration completed successfully.")
+        
     except Exception as e:
-        print(f"Migration error: {e}")
+        print(f"✗ Migration error: {e}")
+        if conn:
+            conn.rollback()
+            print("✓ Rolled back changes due to error")
+    finally:
+        if conn:
+            conn.close()
 
 def extract_video_metadata(caption):
     """استخلاص البيانات الوصفية من كابشن الفيديو."""
@@ -366,7 +405,7 @@ def get_category_by_id(category_id):
 
 # --- دوال الفيديوهات المحدثة ---
 
-def add_video(message_id, caption, chat_id, file_name=None, category_id=None):
+def add_video(message_id, caption, chat_id, file_name=None, category_id=None, file_id=None):
     """إضافة فيديو جديد إلى قاعدة البيانات."""
     try:
         conn = psycopg2.connect(**DB_CONFIG)
@@ -380,12 +419,13 @@ def add_video(message_id, caption, chat_id, file_name=None, category_id=None):
             category_id = get_active_category_id()
         
         c.execute("""
-            INSERT INTO video_archive (message_id, caption, chat_id, file_name, category_id, metadata) 
-            VALUES (%s, %s, %s, %s, %s, %s) 
+            INSERT INTO video_archive (message_id, caption, chat_id, file_name, category_id, metadata, file_id) 
+            VALUES (%s, %s, %s, %s, %s, %s, %s) 
             ON CONFLICT (message_id) DO UPDATE SET
                 caption = EXCLUDED.caption,
-                metadata = EXCLUDED.metadata
-        """, (message_id, caption or "No caption", chat_id, file_name or "", category_id, json.dumps(metadata)))
+                metadata = EXCLUDED.metadata,
+                file_id = EXCLUDED.file_id
+        """, (message_id, caption or "No caption", chat_id, file_name or "", category_id, json.dumps(metadata), file_id))
         
         conn.commit()
         conn.close()
@@ -1112,24 +1152,26 @@ def handle_text_search(message):
 def handle_new_video(message):
     if str(message.chat.id) == CHANNEL_ID:
         active_category_id = get_active_category_id()
+        file_id = message.video.file_id if message.video else None
         print(f"New video detected. Assigning to active category ID: {active_category_id}. Message ID: {message.message_id}")
         success = add_video(
             message_id=message.message_id,
             caption=message.caption,
             chat_id=message.chat.id,
             file_name=message.video.file_name if message.video else "",
-            category_id=active_category_id
+            category_id=active_category_id,
+            file_id=file_id
         )
         if success:
             print("Video added successfully with metadata extraction.")
         else:
             print("Failed to add video.")
 
-# --- معالج ضغطات الأزرار ---
+# --- معالج ضغطات الأزرار المحسن ---
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_query(call):
-    """الاستجابة عند الضغط على الأزرار."""
+    """الاستجابة عند الضغط على الأزرار - نسخة محسنة مع معالجة أخطاء أفضل."""
     try:
         data = call.data.split(CALLBACK_DELIMITER)
         action = data[0]
@@ -1184,7 +1226,10 @@ def callback_query(call):
                 category_id = int(data[2])
                 if set_active_category_id(category_id):
                     category = get_category_by_id(category_id)
-                    bot.edit_message_text(f"✅ تم تفعيل التصنيف '{category[1]}' بنجاح.", call.message.chat.id, call.message.message_id)
+                    if category:
+                        bot.edit_message_text(f"✅ تم تفعيل التصنيف '{category[1]}' بنجاح.", call.message.chat.id, call.message.message_id)
+                    else:
+                        bot.edit_message_text("❌ التصنيف غير موجود.", call.message.chat.id, call.message.message_id)
                 
             elif sub_action == "help":
                 help_text = "قائمة أوامر الإدارة:\n- إحصائيات البوت المتقدمة\n- تعيين التصنيف النشط\n- إضافة تصنيف جديد\n- إضافة قناة مطلوبة\n- إزالة قناة مطلوبة\n- عرض القنوات المطلوبة\n- معرف حسابي (/myid)\n- البث الغني (نص، صور، فيديوهات)\n- نظام التقييمات والإحصائيات"
@@ -1200,7 +1245,6 @@ def callback_query(call):
                 
             elif sub_action == "list_channels":
                 handle_list_channels(call.message)
-            return
 
         elif action == "popular":
             sub_action = data[1]
@@ -1217,84 +1261,70 @@ def callback_query(call):
             elif sub_action == "highest_rated":
                 videos = popular['highest_rated']
                 if videos:
-                    # تحويل البيانات لتتوافق مع create_paginated_keyboard
-                    formatted_videos = []
-                    for video in videos:
-                        formatted_videos.append(video[:8])  # أخذ أول 8 عناصر فقط
+                    formatted_videos = [video[:8] for video in videos]
                     keyboard = create_paginated_keyboard(formatted_videos, len(formatted_videos), 0, "popular_page", "highest_rated")
                     bot.edit_message_text("⭐ الفيديوهات الأعلى تقييماً:", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
                 else:
                     bot.edit_message_text("لا توجد فيديوهات مقيمة حالياً.", call.message.chat.id, call.message.message_id)
             
             bot.answer_callback_query(call.id)
-            return
 
         elif action == "back_to_cats":
             list_videos(call.message, edit_message=call.message)
             bot.answer_callback_query(call.id)
-            return
 
         elif action == "video":
             _, video_id, message_id, chat_id = data
             video_id = int(video_id)
             
-            # زيادة عداد المشاهدات
             increment_video_view_count(video_id)
             
-            # البحث عن الفيديو في قاعدة البيانات للحصول على metadata
             try:
                 video = get_video_by_message_id(int(message_id))
-                if video and video[4]:  # metadata موجود
-                    metadata = json.loads(video[4]) if isinstance(video[4], str) else video[4]
-                    qualities = metadata.get('qualities', [])
+                if not video:
+                    bot.answer_callback_query(call.id, "الفيديو غير موجود.")
+                    return
+                
+                metadata = json.loads(video[4]) if isinstance(video[4], str) else video[4]
+                qualities = metadata.get('qualities', [])
+                
+                if len(qualities) > 1:
+                    keyboard = InlineKeyboardMarkup()
+                    for quality in qualities:
+                        res = quality['resolution']
+                        keyboard.add(InlineKeyboardButton(f"جودة {res}", callback_data=f"quality::{message_id}::{res}"))
                     
-                    if len(qualities) > 1:
-                        # عرض خيارات الجودة
-                        keyboard = InlineKeyboardMarkup()
-                        for quality in qualities:
-                            res = quality['resolution']
-                            keyboard.add(InlineKeyboardButton(f"جودة {res}", callback_data=f"quality::{message_id}::{res}"))
-                        
-                        # إضافة أزرار التقييم
-                        rating_keyboard = create_video_action_keyboard(video_id, call.from_user.id)
-                        for row in rating_keyboard.keyboard:
-                            keyboard.keyboard.append(row)
-                        
-                        bot.send_message(call.message.chat.id, "اختر الجودة المطلوبة:", reply_markup=keyboard)
-                        bot.answer_callback_query(call.id)
-                        return
+                    rating_keyboard = create_video_action_keyboard(video_id, call.from_user.id)
+                    for row in rating_keyboard.keyboard:
+                        keyboard.keyboard.append(row)
+                    
+                    bot.send_message(call.message.chat.id, "اختر الجودة المطلوبة:", reply_markup=keyboard)
+                    bot.answer_callback_query(call.id)
+                    return
                 
-                # إرسال الفيديو مباشرة إذا لم توجد خيارات جودة
                 bot.copy_message(call.message.chat.id, chat_id, int(message_id))
-                
-                # إرسال أزرار التقييم
                 rating_keyboard = create_video_action_keyboard(video_id, call.from_user.id)
                 bot.send_message(call.message.chat.id, "قيم هذا الفيديو:", reply_markup=rating_keyboard)
-                
                 bot.answer_callback_query(call.id, "جاري إرسال الفيديو...")
                 
             except Exception as e:
                 print(f"Error handling video callback: {e}")
-                bot.copy_message(call.message.chat.id, chat_id, int(message_id))
-                bot.answer_callback_query(call.id, "جاري إرسال الفيديو...")
-        
+                bot.answer_callback_query(call.id, "حدث خطأ أثناء إرسال الفيديو.")
+
         elif action == "rate":
             _, video_id, rating = data
             video_id = int(video_id)
             rating = int(rating)
             
             if add_video_rating(video_id, call.from_user.id, rating):
-                # تحديث لوحة المفاتيح لتظهر التقييم الجديد
                 new_keyboard = create_video_action_keyboard(video_id, call.from_user.id)
                 bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=new_keyboard)
                 bot.answer_callback_query(call.id, f"تم تقييم الفيديو بـ {rating} نجوم!")
             else:
                 bot.answer_callback_query(call.id, "حدث خطأ في التقييم.")
-        
+
         elif action == "quality":
             _, original_message_id, resolution = data
-            # هنا يجب أن نبحث عن message_id الخاص بالجودة المحددة
-            # حاليًا سنرسل الفيديو الأصلي (يحتاج تحسين لاحقًا)
             try:
                 video = get_video_by_message_id(int(original_message_id))
                 if video:
@@ -1305,26 +1335,26 @@ def callback_query(call):
             except Exception as e:
                 print(f"Error handling quality callback: {e}")
                 bot.answer_callback_query(call.id, "حدث خطأ.")
-        
+
         elif action == "cat":
             _, category_id, page_str = data
             page = int(page_str)
             category_id = int(category_id)
             
-            # التحقق من وجود تصنيفات فرعية
             child_categories = get_child_categories(category_id)
             if child_categories:
-                # عرض التصنيفات الفرعية
                 keyboard = create_categories_keyboard(category_id)
                 category = get_category_by_id(category_id)
-                bot.edit_message_text(f"التصنيفات الفرعية في '{category[1]}':", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+                if category:
+                    bot.edit_message_text(f"التصنيفات الفرعية في '{category[1]}':", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+                else:
+                    bot.edit_message_text("التصنيف غير موجود.", call.message.chat.id, call.message.message_id)
             else:
-                # عرض الفيديوهات في هذا التصنيف
                 videos, total_count = get_videos(category_id, page)
                 if videos:
                     keyboard = create_paginated_keyboard(videos, total_count, page, "cat", category_id)
                     category = get_category_by_id(category_id)
-                    bot.edit_message_text(f"الفيديوهات في فئة '{category[1]}':", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+                    bot.edit_message_text(f"الفيديوهات في فئة '{category[1] if category else 'غير معروف'}':", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
                 else:
                     bot.edit_message_text("لا توجد فيديوهات في هذا التصنيف.", call.message.chat.id, call.message.message_id)
             
@@ -1352,11 +1382,11 @@ def callback_query(call):
                 videos, total_count = search_videos(query, page=page, category_id=category_id)
                 if not videos:
                     category = get_category_by_id(category_id)
-                    bot.edit_message_text(f"لم يتم العثور على نتائج للبحث عن '{query}' في فئة '{category[1]}'.", call.message.chat.id, call.message.message_id)
+                    bot.edit_message_text(f"لم يتم العثور على نتائج للبحث عن '{query}' في فئة '{category[1] if category else 'غير معروف'}'.", call.message.chat.id, call.message.message_id)
                     return
                 keyboard = create_paginated_keyboard(videos, total_count, page, "search_cat", category_id)
                 category = get_category_by_id(category_id)
-                bot.edit_message_text(f"نتائج البحث عن '{query}' في فئة '{category[1]}':", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+                bot.edit_message_text(f"نتائج البحث عن '{query}' في فئة '{category[1] if category else 'غير معروف'}':", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
 
         elif action == "search_all":
             _, context, page_str = data
@@ -1381,7 +1411,7 @@ def callback_query(call):
             videos, total_count = search_videos(query, page=page, category_id=category_id)
             keyboard = create_paginated_keyboard(videos, total_count, page, "search_cat", category_id)
             category = get_category_by_id(category_id)
-            bot.edit_message_text(f"نتائج البحث عن '{query}' في فئة '{category[1]}':", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+            bot.edit_message_text(f"نتائج البحث عن '{query}' في فئة '{category[1] if category else 'غير معروف'}':", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
             bot.answer_callback_query(call.id)
         
         elif action == "noop":
@@ -1389,14 +1419,14 @@ def callback_query(call):
 
     except Exception as e:
         print(f"Callback query error: {e}")
-        bot.answer_callback_query(call.id, "حدث خطأ.")
+        bot.answer_callback_query(call.id, "حدث خطأ. حاول مرة أخرى.")
 
 # --- نقطة انطلاق البوت ---
 
 if __name__ == "__main__":
     init_db()
     migrate_old_data()  # ترحيل البيانات القديمة إذا وجدت
-    print("Enhanced bot with ratings is starting...")
+    print("Enhanced bot with robust migration is starting...")
     while True:
         try:
             bot.polling(non_stop=True)
