@@ -1,6 +1,7 @@
 # ==============================================================================
-# ملف: enhanced_bot.py
+# ملف: bot.py (النسخة النهائية والمصححة)
 # الوصف: النسخة المطورة من البوت مع التصنيفات الشجرية واختيار الجودة والبث الغني
+#        مع تصحيحات لهيكل قاعدة البيانات وعملية الترحيل.
 # ==============================================================================
 
 import telebot
@@ -14,10 +15,10 @@ from urllib.parse import urlparse
 import math
 
 # --- الإعدادات الأساسية (قراءة آمنة من متغيرات البيئة) ---
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-DATABASE_URL = os.getenv('DATABASE_URL')
-CHANNEL_ID = os.getenv('CHANNEL_ID')
-ADMIN_IDS = [int(admin_id) for admin_id in os.getenv('ADMIN_IDS', '').split(',') if admin_id] # معرفات حسابات الآدمن
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+DATABASE_URL = os.getenv("DATABASE_URL")
+CHANNEL_ID = os.getenv("CHANNEL_ID")
+ADMIN_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS", "").split(",") if admin_id] # معرفات حسابات الآدمن
 
 if not all([BOT_TOKEN, DATABASE_URL, CHANNEL_ID, ADMIN_IDS]):
     print("FATAL ERROR: Missing one or more environment variables (BOT_TOKEN, DATABASE_URL, CHANNEL_ID, ADMIN_IDS).")
@@ -29,18 +30,18 @@ DB_CONFIG = {}
 if DATABASE_URL:
     url = urlparse(DATABASE_URL)
     DB_CONFIG = {
-        'dbname': url.path[1:],
-        'user': url.username,
-        'password': url.password,
-        'host': url.hostname,
-        'port': url.port
+        "dbname": url.path[1:],
+        "user": url.username,
+        "password": url.password,
+        "host": url.hostname,
+        "port": url.port
     }
 
 # قاموس مؤقت لتخزين بيانات عمليات الآدمن
 admin_steps = {}
 user_last_search = {} # لتخزين آخر عملية بحث لكل مستخدم
 VIDEOS_PER_PAGE = 10 # عدد الفيديوهات في كل صفحة
-CALLBACK_DELIMITER = '::' # فاصل آمن للبيانات
+CALLBACK_DELIMITER = "::" # فاصل آمن للبيانات
 
 # --- دوال قاعدة البيانات ---
 
@@ -51,51 +52,51 @@ def init_db():
         c = conn.cursor()
         
         # جدول التصنيفات الجديد (شجري)
-        c.execute('''
+        c.execute("""
             CREATE TABLE IF NOT EXISTS categories (
                 id SERIAL PRIMARY KEY,
                 name TEXT NOT NULL,
-                parent_id INTEGER REFERENCES categories(id),
+                parent_id INTEGER REFERENCES categories(id) ON DELETE CASCADE,
                 full_path TEXT NOT NULL UNIQUE
             )
-        ''')
+        """)
         
         # جدول الفيديوهات المحدث
-        c.execute('''
+        c.execute("""
             CREATE TABLE IF NOT EXISTS video_archive (
                 id SERIAL PRIMARY KEY,
-                message_id INTEGER UNIQUE,
+                message_id BIGINT UNIQUE,
                 caption TEXT,
                 chat_id BIGINT,
                 file_name TEXT,
-                category_id INTEGER REFERENCES categories(id) NOT NULL,
-                metadata JSONB DEFAULT '{}'
+                category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+                metadata JSONB DEFAULT '{}'::jsonb
             )
-        ''')
+        """)
         
         # باقي الجداول
-        c.execute('''
+        c.execute("""
             CREATE TABLE IF NOT EXISTS bot_settings (
                 setting_key TEXT PRIMARY KEY,
                 setting_value TEXT
             )
-        ''')
+        """)
         
-        c.execute('''
+        c.execute("""
             CREATE TABLE IF NOT EXISTS bot_users (
                 user_id BIGINT PRIMARY KEY,
                 username TEXT,
                 first_name TEXT,
                 join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-        ''')
+        """)
         
-        c.execute('''
+        c.execute("""
             CREATE TABLE IF NOT EXISTS required_channels (
                 channel_id BIGINT PRIMARY KEY,
                 channel_name TEXT
             )
-        ''')
+        """)
         
         conn.commit()
         conn.close()
@@ -109,19 +110,19 @@ def migrate_old_data():
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
         
-        # التحقق من وجود عمود category القديم
+        # التحقق من وجود عمود category القديم في video_archive
         c.execute("""
             SELECT column_name FROM information_schema.columns 
             WHERE table_name = 'video_archive' AND column_name = 'category'
         """)
         
         if c.fetchone():
-            print("Found old category column, starting migration...")
+            print("Found old category column in video_archive, starting migration...")
             
             # الحصول على جميع التصنيفات الفريدة من النظام القديم
             c.execute("SELECT DISTINCT category FROM video_archive WHERE category IS NOT NULL")
             old_categories = [row[0] for row in c.fetchall()]
-            
+
             # إنشاء التصنيفات في الجدول الجديد
             for cat_name in old_categories:
                 full_path = f"/{cat_name}/"
@@ -130,7 +131,7 @@ def migrate_old_data():
                     VALUES (%s, NULL, %s)
                     ON CONFLICT (full_path) DO NOTHING
                 """, (cat_name, full_path))
-            
+
             # تحديث جدول video_archive لاستخدام category_id
             c.execute("""
                 UPDATE video_archive 
@@ -139,14 +140,14 @@ def migrate_old_data():
                 WHERE video_archive.category = categories.name
                 AND video_archive.category_id IS NULL
             """)
-            
-            # حذف عمود category القديم (اختياري - يمكن تأجيله)
-            # c.execute("ALTER TABLE video_archive DROP COLUMN IF EXISTS category")
+
+            # حذف عمود category القديم بعد الترحيل
+            c.execute("ALTER TABLE video_archive DROP COLUMN IF EXISTS category")
             
             conn.commit()
             print("Migration completed successfully.")
         else:
-            print("No old category column found, skipping migration.")
+            print("No old category column found in video_archive, skipping migration.")
             
         conn.close()
     except Exception as e:
@@ -609,7 +610,7 @@ def create_categories_keyboard(parent_id=None):
     
     if parent_id:  # إذا كنا في تصنيف فرعي، أضف زر الرجوع
         parent_category = get_category_by_id(parent_id)
-        if parent_category and parent_category[2]:  # parent_id موجود
+        if parent_category and parent_category[2] is not None:  # parent_id موجود
             keyboard.row(InlineKeyboardButton("⬅️ الرجوع", callback_data=f"cat::{parent_category[2]}::0"))
         else:
             keyboard.row(InlineKeyboardButton("⬅️ الرجوع للرئيسية", callback_data="back_to_cats"))
@@ -1049,4 +1050,3 @@ if __name__ == "__main__":
             print(f"An error occurred in the main loop: {e}")
             print("Restarting in 15 seconds...")
             time.sleep(15)
-
