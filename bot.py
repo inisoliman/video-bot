@@ -1,7 +1,7 @@
 # ==============================================================================
-# ملف: bot.py (النسخة النهائية والمصححة)
+# ملف: bot.py (النسخة المصححة نهائياً)
 # الوصف: النسخة المطورة من البوت مع التصنيفات الشجرية واختيار الجودة والبث الغني
-#        مع تصحيحات لهيكل قاعدة البيانات وعملية الترحيل.
+#        مع تصحيحات شاملة لهيكل قاعدة البيانات وعملية الترحيل والتقييمات.
 # ==============================================================================
 
 import telebot
@@ -13,6 +13,7 @@ import json
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from urllib.parse import urlparse
 import math
+from datetime import datetime
 
 # --- الإعدادات الأساسية (قراءة آمنة من متغيرات البيئة) ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -70,7 +71,21 @@ def init_db():
                 chat_id BIGINT,
                 file_name TEXT,
                 category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
-                metadata JSONB DEFAULT '{}'::jsonb
+                metadata JSONB DEFAULT '{}'::jsonb,
+                view_count INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # جدول التقييمات
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS video_ratings (
+                id SERIAL PRIMARY KEY,
+                video_id INTEGER REFERENCES video_archive(id) ON DELETE CASCADE,
+                user_id BIGINT NOT NULL,
+                rating INTEGER CHECK (rating >= 1 AND rating <= 5),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(video_id, user_id)
             )
         """)
         
@@ -120,17 +135,22 @@ def migrate_old_data():
             print("Found old category column in video_archive, starting migration...")
             
             # الحصول على جميع التصنيفات الفريدة من النظام القديم
-            c.execute("SELECT DISTINCT category FROM video_archive WHERE category IS NOT NULL")
+            c.execute("SELECT DISTINCT category FROM video_archive WHERE category IS NOT NULL AND category != ''")
             old_categories = [row[0] for row in c.fetchall()]
+            print(f"Found {len(old_categories)} unique categories to migrate: {old_categories}")
 
             # إنشاء التصنيفات في الجدول الجديد
             for cat_name in old_categories:
                 full_path = f"/{cat_name}/"
-                c.execute("""
-                    INSERT INTO categories (name, parent_id, full_path)
-                    VALUES (%s, NULL, %s)
-                    ON CONFLICT (full_path) DO NOTHING
-                """, (cat_name, full_path))
+                try:
+                    c.execute("""
+                        INSERT INTO categories (name, parent_id, full_path)
+                        VALUES (%s, NULL, %s)
+                        ON CONFLICT (full_path) DO NOTHING
+                    """, (cat_name, full_path))
+                    print(f"Created category: {cat_name}")
+                except Exception as e:
+                    print(f"Error creating category {cat_name}: {e}")
 
             # تحديث جدول video_archive لاستخدام category_id
             c.execute("""
@@ -140,6 +160,11 @@ def migrate_old_data():
                 WHERE video_archive.category = categories.name
                 AND video_archive.category_id IS NULL
             """)
+            
+            # التحقق من عدد الفيديوهات التي تم ترحيلها
+            c.execute("SELECT COUNT(*) FROM video_archive WHERE category_id IS NOT NULL")
+            migrated_count = c.fetchone()[0]
+            print(f"Migrated {migrated_count} videos to new category system")
 
             # حذف عمود category القديم بعد الترحيل
             c.execute("ALTER TABLE video_archive DROP COLUMN IF EXISTS category")
@@ -147,7 +172,43 @@ def migrate_old_data():
             conn.commit()
             print("Migration completed successfully.")
         else:
-            print("No old category column found in video_archive, skipping migration.")
+            print("No old category column found in video_archive, checking if migration is needed...")
+            
+            # التحقق من وجود فيديوهات بدون category_id
+            c.execute("SELECT COUNT(*) FROM video_archive WHERE category_id IS NULL")
+            orphaned_videos = c.fetchone()[0]
+            
+            if orphaned_videos > 0:
+                print(f"Found {orphaned_videos} videos without category_id, creating default category...")
+                
+                # إنشاء تصنيف افتراضي للفيديوهات اليتيمة
+                default_category_name = "Uncategorized"
+                full_path = f"/{default_category_name}/"
+                
+                c.execute("""
+                    INSERT INTO categories (name, parent_id, full_path)
+                    VALUES (%s, NULL, %s)
+                    ON CONFLICT (full_path) DO NOTHING
+                    RETURNING id
+                """, (default_category_name, full_path))
+                
+                result = c.fetchone()
+                if result:
+                    default_category_id = result[0]
+                else:
+                    # إذا كان التصنيف موجود بالفعل، احصل على معرفه
+                    c.execute("SELECT id FROM categories WHERE full_path = %s", (full_path,))
+                    default_category_id = c.fetchone()[0]
+                
+                # تحديث الفيديوهات اليتيمة
+                c.execute("""
+                    UPDATE video_archive 
+                    SET category_id = %s 
+                    WHERE category_id IS NULL
+                """, (default_category_id,))
+                
+                conn.commit()
+                print(f"Assigned {orphaned_videos} orphaned videos to default category")
             
         conn.close()
     except Exception as e:
@@ -241,12 +302,20 @@ def get_child_categories(parent_id=None):
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
-        c.execute("""
-            SELECT id, name, full_path 
-            FROM categories 
-            WHERE parent_id %s
-            ORDER BY name
-        """ % ("IS NULL" if parent_id is None else f"= {parent_id}"))
+        if parent_id is None:
+            c.execute("""
+                SELECT id, name, full_path 
+                FROM categories 
+                WHERE parent_id IS NULL
+                ORDER BY name
+            """)
+        else:
+            c.execute("""
+                SELECT id, name, full_path 
+                FROM categories 
+                WHERE parent_id = %s
+                ORDER BY name
+            """, (parent_id,))
         categories = c.fetchall()
         conn.close()
         return categories
@@ -308,7 +377,7 @@ def get_videos(category_id=None, page=0):
             # الحصول على الفيديوهات في تصنيف معين وجميع التصنيفات الفرعية
             c.execute("""
                 SELECT COUNT(*) FROM video_archive va
-                JOIN categories cat ON va.category_id = cat.id
+                LEFT JOIN categories cat ON va.category_id = cat.id
                 WHERE cat.id = %s OR cat.full_path LIKE (
                     SELECT full_path || '%%' FROM categories WHERE id = %s
                 )
@@ -316,9 +385,10 @@ def get_videos(category_id=None, page=0):
             total_count = c.fetchone()[0]
 
             c.execute("""
-                SELECT va.message_id, va.caption, va.chat_id, va.file_name, va.metadata, cat.name as category_name
+                SELECT va.id, va.message_id, va.caption, va.chat_id, va.file_name, va.metadata, 
+                       COALESCE(cat.name, 'Uncategorized') as category_name, va.view_count
                 FROM video_archive va
-                JOIN categories cat ON va.category_id = cat.id
+                LEFT JOIN categories cat ON va.category_id = cat.id
                 WHERE cat.id = %s OR cat.full_path LIKE (
                     SELECT full_path || '%%' FROM categories WHERE id = %s
                 )
@@ -329,9 +399,10 @@ def get_videos(category_id=None, page=0):
             total_count = c.fetchone()[0]
 
             c.execute("""
-                SELECT va.message_id, va.caption, va.chat_id, va.file_name, va.metadata, cat.name as category_name
+                SELECT va.id, va.message_id, va.caption, va.chat_id, va.file_name, va.metadata, 
+                       COALESCE(cat.name, 'Uncategorized') as category_name, va.view_count
                 FROM video_archive va
-                JOIN categories cat ON va.category_id = cat.id
+                LEFT JOIN categories cat ON va.category_id = cat.id
                 ORDER BY va.id LIMIT %s OFFSET %s
             """, (VIDEOS_PER_PAGE, offset))
         
@@ -342,6 +413,32 @@ def get_videos(category_id=None, page=0):
         print(f"Get videos error: {e}")
         return [], 0
 
+def increment_video_view_count(video_id):
+    """زيادة عداد المشاهدات للفيديو."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        c = conn.cursor()
+        c.execute("UPDATE video_archive SET view_count = view_count + 1 WHERE id = %s", (video_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Increment view count error: {e}")
+        return False
+
+def get_video_by_message_id(message_id):
+    """الحصول على فيديو بواسطة message_id."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        c = conn.cursor()
+        c.execute("SELECT id, message_id, caption, chat_id, metadata FROM video_archive WHERE message_id = %s", (message_id,))
+        video = c.fetchone()
+        conn.close()
+        return video
+    except Exception as e:
+        print(f"Get video by message id error: {e}")
+        return None
+
 def get_active_category_id():
     """الحصول على معرف التصنيف النشط."""
     try:
@@ -349,17 +446,37 @@ def get_active_category_id():
         c = conn.cursor()
         c.execute("SELECT setting_value FROM bot_settings WHERE setting_key = 'active_category_id'")
         result = c.fetchone()
-        conn.close()
         
         if result:
+            conn.close()
             return int(result[0])
         else:
             # إنشاء تصنيف افتراضي إذا لم يوجد
-            success, category_id = add_category("Uncategorized")
-            if success:
-                set_active_category_id(category_id)
-                return category_id
-            return None
+            c.execute("""
+                INSERT INTO categories (name, parent_id, full_path)
+                VALUES ('Uncategorized', NULL, '/Uncategorized/')
+                ON CONFLICT (full_path) DO NOTHING
+                RETURNING id
+            """)
+            
+            result = c.fetchone()
+            if result:
+                category_id = result[0]
+            else:
+                # إذا كان التصنيف موجود بالفعل، احصل على معرفه
+                c.execute("SELECT id FROM categories WHERE full_path = '/Uncategorized/'")
+                category_id = c.fetchone()[0]
+            
+            # تعيين التصنيف كنشط
+            c.execute("""
+                INSERT INTO bot_settings (setting_key, setting_value) 
+                VALUES ('active_category_id', %s)
+                ON CONFLICT (setting_key) DO UPDATE SET setting_value = EXCLUDED.setting_value
+            """, (str(category_id),))
+            
+            conn.commit()
+            conn.close()
+            return category_id
     except Exception as e:
         print(f"Get active category id error: {e}")
         return None
@@ -380,6 +497,106 @@ def set_active_category_id(category_id):
     except Exception as e:
         print(f"Set active category id error: {e}")
         return False
+
+# --- دوال التقييمات ---
+
+def add_video_rating(video_id, user_id, rating):
+    """إضافة أو تحديث تقييم فيديو."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO video_ratings (video_id, user_id, rating)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (video_id, user_id) DO UPDATE SET
+                rating = EXCLUDED.rating,
+                created_at = CURRENT_TIMESTAMP
+        """, (video_id, user_id, rating))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Add video rating error: {e}")
+        return False
+
+def get_video_rating_stats(video_id):
+    """الحصول على إحصائيات تقييم فيديو."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        c = conn.cursor()
+        c.execute("""
+            SELECT 
+                COUNT(*) as total_ratings,
+                AVG(rating)::NUMERIC(3,2) as average_rating
+            FROM video_ratings 
+            WHERE video_id = %s
+        """, (video_id,))
+        result = c.fetchone()
+        conn.close()
+        
+        if result and result[0] > 0:
+            return {
+                "total_ratings": result[0],
+                "average_rating": float(result[1]) if result[1] else 0
+            }
+        return {"total_ratings": 0, "average_rating": 0}
+    except Exception as e:
+        print(f"Get video rating stats error: {e}")
+        return {"total_ratings": 0, "average_rating": 0}
+
+def get_user_video_rating(video_id, user_id):
+    """الحصول على تقييم المستخدم لفيديو معين."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        c = conn.cursor()
+        c.execute("SELECT rating FROM video_ratings WHERE video_id = %s AND user_id = %s", (video_id, user_id))
+        result = c.fetchone()
+        conn.close()
+        return result[0] if result else None
+    except Exception as e:
+        print(f"Get user video rating error: {e}")
+        return None
+
+def get_popular_videos():
+    """الحصول على الفيديوهات الأكثر شعبية."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        c = conn.cursor()
+        
+        # الأكثر مشاهدة
+        c.execute("""
+            SELECT va.id, va.message_id, va.caption, va.chat_id, va.file_name, va.metadata, 
+                   COALESCE(cat.name, 'Uncategorized') as category_name, va.view_count
+            FROM video_archive va
+            LEFT JOIN categories cat ON va.category_id = cat.id
+            ORDER BY va.view_count DESC
+            LIMIT 10
+        """)
+        most_viewed = c.fetchall()
+        
+        # الأعلى تقييماً
+        c.execute("""
+            SELECT va.id, va.message_id, va.caption, va.chat_id, va.file_name, va.metadata, 
+                   COALESCE(cat.name, 'Uncategorized') as category_name, va.view_count,
+                   AVG(vr.rating)::NUMERIC(3,2) as avg_rating, COUNT(vr.rating) as rating_count
+            FROM video_archive va
+            LEFT JOIN categories cat ON va.category_id = cat.id
+            LEFT JOIN video_ratings vr ON va.id = vr.video_id
+            GROUP BY va.id, cat.name
+            HAVING COUNT(vr.rating) >= 3
+            ORDER BY AVG(vr.rating) DESC, COUNT(vr.rating) DESC
+            LIMIT 10
+        """)
+        highest_rated = c.fetchall()
+        
+        conn.close()
+        return {
+            "most_viewed": most_viewed,
+            "highest_rated": highest_rated
+        }
+    except Exception as e:
+        print(f"Get popular videos error: {e}")
+        return {"most_viewed": [], "highest_rated": []}
 
 # --- باقي الدوال من النسخة السابقة (مع التعديلات اللازمة) ---
 
@@ -433,11 +650,20 @@ def get_bot_stats():
         video_count = c.fetchone()[0]
         c.execute("SELECT COUNT(*) FROM categories")
         category_count = c.fetchone()[0]
+        c.execute("SELECT SUM(view_count) FROM video_archive")
+        total_views = c.fetchone()[0] or 0
+        c.execute("SELECT COUNT(*) FROM video_ratings")
+        total_ratings = c.fetchone()[0]
         conn.close()
-        return video_count, category_count
+        return {
+            "video_count": video_count,
+            "category_count": category_count,
+            "total_views": total_views,
+            "total_ratings": total_ratings
+        }
     except Exception as e:
         print(f"Get bot stats error: {e}")
-        return 0, 0
+        return {"video_count": 0, "category_count": 0, "total_views": 0, "total_ratings": 0}
 
 def search_videos(query, page=0, category_id=None):
     """البحث عن فيديوهات في قاعدة البيانات مع تطبيع الحروف العربية."""
@@ -467,16 +693,17 @@ def search_videos(query, page=0, category_id=None):
 
         count_query = f"""
             SELECT COUNT(*) FROM video_archive va
-            JOIN categories cat ON va.category_id = cat.id
+            LEFT JOIN categories cat ON va.category_id = cat.id
             WHERE {base_where}
         """
         c.execute(count_query, tuple(params))
         total_count = c.fetchone()[0]
 
         data_query = f"""
-            SELECT va.message_id, va.caption, va.chat_id, va.file_name, va.metadata, cat.name as category_name
+            SELECT va.id, va.message_id, va.caption, va.chat_id, va.file_name, va.metadata, 
+                   COALESCE(cat.name, 'Uncategorized') as category_name, va.view_count
             FROM video_archive va
-            JOIN categories cat ON va.category_id = cat.id
+            LEFT JOIN categories cat ON va.category_id = cat.id
             WHERE {base_where}
             ORDER BY va.id LIMIT %s OFFSET %s
         """
@@ -562,7 +789,7 @@ def create_paginated_keyboard(items, total_items, page, prefix, context):
     keyboard = InlineKeyboardMarkup(row_width=1)
     
     for item in items:
-        message_id, caption, chat_id, file_name, metadata, category_name = item
+        video_id, message_id, caption, chat_id, file_name, metadata, category_name, view_count = item
         title = caption or file_name or "فيديو بدون عنوان"
         
         # إضافة مؤشرات الترجمة/الدبلجة
@@ -578,9 +805,9 @@ def create_paginated_keyboard(items, total_items, page, prefix, context):
                 pass
         
         indicator_text = f" ({', '.join(indicators)})" if indicators else ""
-        button_text = f"{title[:40]}{indicator_text} - {category_name}"
+        button_text = f"{title[:35]}{indicator_text} - {category_name} 👁 {view_count}"
         
-        keyboard.add(InlineKeyboardButton(text=button_text, callback_data=f"video::{message_id}::{chat_id}"))
+        keyboard.add(InlineKeyboardButton(text=button_text, callback_data=f"video::{video_id}::{message_id}::{chat_id}"))
 
     # أزرار التنقل
     total_pages = math.ceil(total_items / VIDEOS_PER_PAGE)
@@ -617,11 +844,36 @@ def create_categories_keyboard(parent_id=None):
     
     return keyboard
 
+def create_video_action_keyboard(video_id, user_id):
+    """إنشاء لوحة مفاتيح لإجراءات الفيديو (تقييم، إلخ)."""
+    keyboard = InlineKeyboardMarkup(row_width=5)
+    
+    # أزرار التقييم
+    rating_buttons = []
+    user_rating = get_user_video_rating(video_id, user_id)
+    
+    for i in range(1, 6):
+        star = "⭐" if user_rating == i else "☆"
+        rating_buttons.append(InlineKeyboardButton(star, callback_data=f"rate::{video_id}::{i}"))
+    
+    keyboard.row(*rating_buttons)
+    
+    # إحصائيات التقييم
+    stats = get_video_rating_stats(video_id)
+    if stats["total_ratings"] > 0:
+        keyboard.row(InlineKeyboardButton(
+            f"⭐ {stats['average_rating']:.1f} ({stats['total_ratings']} تقييم)", 
+            callback_data="noop"
+        ))
+    
+    return keyboard
+
 def main_menu():
     """إنشاء القائمة الرئيسية للبوت."""
-    markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+    markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     list_button = KeyboardButton('🎬 عرض كل الفيديوهات')
-    markup.add(list_button)
+    popular_button = KeyboardButton('🔥 الفيديوهات الشائعة')
+    markup.add(list_button, popular_button)
     return markup
 
 # --- أوامر البوت ---
@@ -653,6 +905,20 @@ def get_my_id(message):
 @bot.message_handler(func=lambda message: message.text == '🎬 عرض كل الفيديوهات')
 def handle_list_videos_button(message):
     list_videos(message)
+
+@bot.message_handler(func=lambda message: message.text == '🔥 الفيديوهات الشائعة')
+def handle_popular_videos_button(message):
+    show_popular_videos(message)
+
+def show_popular_videos(message):
+    """عرض الفيديوهات الشائعة."""
+    popular = get_popular_videos()
+    
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    keyboard.add(InlineKeyboardButton("📈 الأكثر مشاهدة", callback_data="popular::most_viewed"))
+    keyboard.add(InlineKeyboardButton("⭐ الأعلى تقييماً", callback_data="popular::highest_rated"))
+    
+    bot.reply_to(message, "اختر نوع الفيديوهات الشائعة:", reply_markup=keyboard)
 
 def list_videos(message, edit_message=None, parent_id=None):
     """عرض التصنيفات المتاحة."""
@@ -853,8 +1119,23 @@ def callback_query(call):
                 bot.send_message(call.message.chat.id, f"👤 إجمالي عدد المشتركين في البوت: *{count}*", parse_mode='Markdown')
             
             elif sub_action == "stats":
-                video_count, category_count = get_bot_stats()
-                stats_text = f"📊 *إحصائيات المحتوى*\n\n- إجمالي الفيديوهات: *{video_count}*\n- إجمالي التصنيفات: *{category_count}*"
+                stats = get_bot_stats()
+                popular = get_popular_videos()
+                
+                stats_text = f"📊 *إحصائيات المحتوى*\n\n"
+                stats_text += f"- إجمالي الفيديوهات: *{stats['video_count']}*\n"
+                stats_text += f"- إجمالي التصنيفات: *{stats['category_count']}*\n"
+                stats_text += f"- إجمالي المشاهدات: *{stats['total_views']}*\n"
+                stats_text += f"- إجمالي التقييمات: *{stats['total_ratings']}*\n\n"
+                
+                if popular['most_viewed']:
+                    most_viewed = popular['most_viewed'][0]
+                    stats_text += f"🔥 الأكثر مشاهدة: {most_viewed[2] or most_viewed[4] or 'فيديو'} ({most_viewed[7]} مشاهدة)\n"
+                
+                if popular['highest_rated']:
+                    highest_rated = popular['highest_rated'][0]
+                    stats_text += f"⭐ الأعلى تقييماً: {highest_rated[2] or highest_rated[4] or 'فيديو'} ({highest_rated[8]:.1f}/5)\n"
+                
                 bot.send_message(call.message.chat.id, stats_text, parse_mode='Markdown')
             
             elif sub_action == "add_new_cat":
@@ -878,7 +1159,7 @@ def callback_query(call):
                     bot.edit_message_text(f"✅ تم تفعيل التصنيف '{category[1]}' بنجاح.", call.message.chat.id, call.message.message_id)
                 
             elif sub_action == "help":
-                help_text = "قائمة أوامر الإدارة:\n- إحصائيات البوت\n- تعيين التصنيف النشط\n- إضافة تصنيف جديد\n- إضافة قناة مطلوبة\n- إزالة قناة مطلوبة\n- عرض القنوات المطلوبة\n- معرف حسابي (/myid)\n- البث الغني (نص، صور، فيديوهات)"
+                help_text = "قائمة أوامر الإدارة:\n- إحصائيات البوت المتقدمة\n- تعيين التصنيف النشط\n- إضافة تصنيف جديد\n- إضافة قناة مطلوبة\n- إزالة قناة مطلوبة\n- عرض القنوات المطلوبة\n- معرف حسابي (/myid)\n- البث الغني (نص، صور، فيديوهات)\n- نظام التقييمات والإحصائيات"
                 bot.send_message(call.message.chat.id, help_text)
                 
             elif sub_action == "add_channel":
@@ -893,24 +1174,50 @@ def callback_query(call):
                 handle_list_channels(call.message)
             return
 
-        if action == "back_to_cats":
+        elif action == "popular":
+            sub_action = data[1]
+            popular = get_popular_videos()
+            
+            if sub_action == "most_viewed":
+                videos = popular['most_viewed']
+                if videos:
+                    keyboard = create_paginated_keyboard(videos, len(videos), 0, "popular_page", "most_viewed")
+                    bot.edit_message_text("📈 الفيديوهات الأكثر مشاهدة:", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+                else:
+                    bot.edit_message_text("لا توجد فيديوهات مشاهدة حالياً.", call.message.chat.id, call.message.message_id)
+            
+            elif sub_action == "highest_rated":
+                videos = popular['highest_rated']
+                if videos:
+                    # تحويل البيانات لتتوافق مع create_paginated_keyboard
+                    formatted_videos = []
+                    for video in videos:
+                        formatted_videos.append(video[:8])  # أخذ أول 8 عناصر فقط
+                    keyboard = create_paginated_keyboard(formatted_videos, len(formatted_videos), 0, "popular_page", "highest_rated")
+                    bot.edit_message_text("⭐ الفيديوهات الأعلى تقييماً:", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+                else:
+                    bot.edit_message_text("لا توجد فيديوهات مقيمة حالياً.", call.message.chat.id, call.message.message_id)
+            
+            bot.answer_callback_query(call.id)
+            return
+
+        elif action == "back_to_cats":
             list_videos(call.message, edit_message=call.message)
             bot.answer_callback_query(call.id)
             return
 
-        if action == "video":
-            _, message_id, chat_id = data
+        elif action == "video":
+            _, video_id, message_id, chat_id = data
+            video_id = int(video_id)
+            
+            # زيادة عداد المشاهدات
+            increment_video_view_count(video_id)
             
             # البحث عن الفيديو في قاعدة البيانات للحصول على metadata
             try:
-                conn = psycopg2.connect(**DB_CONFIG)
-                c = conn.cursor()
-                c.execute("SELECT metadata FROM video_archive WHERE message_id = %s", (int(message_id),))
-                result = c.fetchone()
-                conn.close()
-                
-                if result and result[0]:
-                    metadata = json.loads(result[0]) if isinstance(result[0], str) else result[0]
+                video = get_video_by_message_id(int(message_id))
+                if video and video[4]:  # metadata موجود
+                    metadata = json.loads(video[4]) if isinstance(video[4], str) else video[4]
                     qualities = metadata.get('qualities', [])
                     
                     if len(qualities) > 1:
@@ -919,12 +1226,23 @@ def callback_query(call):
                         for quality in qualities:
                             res = quality['resolution']
                             keyboard.add(InlineKeyboardButton(f"جودة {res}", callback_data=f"quality::{message_id}::{res}"))
+                        
+                        # إضافة أزرار التقييم
+                        rating_keyboard = create_video_action_keyboard(video_id, call.from_user.id)
+                        for row in rating_keyboard.keyboard:
+                            keyboard.keyboard.append(row)
+                        
                         bot.send_message(call.message.chat.id, "اختر الجودة المطلوبة:", reply_markup=keyboard)
                         bot.answer_callback_query(call.id)
                         return
                 
                 # إرسال الفيديو مباشرة إذا لم توجد خيارات جودة
                 bot.copy_message(call.message.chat.id, chat_id, int(message_id))
+                
+                # إرسال أزرار التقييم
+                rating_keyboard = create_video_action_keyboard(video_id, call.from_user.id)
+                bot.send_message(call.message.chat.id, "قيم هذا الفيديو:", reply_markup=rating_keyboard)
+                
                 bot.answer_callback_query(call.id, "جاري إرسال الفيديو...")
                 
             except Exception as e:
@@ -932,19 +1250,27 @@ def callback_query(call):
                 bot.copy_message(call.message.chat.id, chat_id, int(message_id))
                 bot.answer_callback_query(call.id, "جاري إرسال الفيديو...")
         
+        elif action == "rate":
+            _, video_id, rating = data
+            video_id = int(video_id)
+            rating = int(rating)
+            
+            if add_video_rating(video_id, call.from_user.id, rating):
+                # تحديث لوحة المفاتيح لتظهر التقييم الجديد
+                new_keyboard = create_video_action_keyboard(video_id, call.from_user.id)
+                bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=new_keyboard)
+                bot.answer_callback_query(call.id, f"تم تقييم الفيديو بـ {rating} نجوم!")
+            else:
+                bot.answer_callback_query(call.id, "حدث خطأ في التقييم.")
+        
         elif action == "quality":
             _, original_message_id, resolution = data
             # هنا يجب أن نبحث عن message_id الخاص بالجودة المحددة
             # حاليًا سنرسل الفيديو الأصلي (يحتاج تحسين لاحقًا)
             try:
-                conn = psycopg2.connect(**DB_CONFIG)
-                c = conn.cursor()
-                c.execute("SELECT chat_id FROM video_archive WHERE message_id = %s", (int(original_message_id),))
-                result = c.fetchone()
-                conn.close()
-                
-                if result:
-                    bot.copy_message(call.message.chat.id, result[0], int(original_message_id))
+                video = get_video_by_message_id(int(original_message_id))
+                if video:
+                    bot.copy_message(call.message.chat.id, video[3], int(original_message_id))
                     bot.answer_callback_query(call.id, f"جاري إرسال الفيديو بجودة {resolution}...")
                 else:
                     bot.answer_callback_query(call.id, "خطأ في العثور على الفيديو.")
@@ -1042,7 +1368,7 @@ def callback_query(call):
 if __name__ == "__main__":
     init_db()
     migrate_old_data()  # ترحيل البيانات القديمة إذا وجدت
-    print("Enhanced bot is starting...")
+    print("Enhanced bot with ratings is starting...")
     while True:
         try:
             bot.polling(non_stop=True)
@@ -1050,3 +1376,4 @@ if __name__ == "__main__":
             print(f"An error occurred in the main loop: {e}")
             print("Restarting in 15 seconds...")
             time.sleep(15)
+
