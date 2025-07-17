@@ -264,9 +264,10 @@ def extract_video_metadata(caption, message_id):
         return metadata
 
     quality_patterns = {
-        "1080p": [r"1080[pP]", r"FHD", r"Full\s*HD"],
-        "720p": [r"720[pP]", r"\bHD\b"],
-        "480p": [r"480[pP]", r"\bSD\b"]
+        "1080p": [r"1080[pP]", r"FHD", r"Full\s*HD", r"1080"],
+        "720p": [r"720[pP]", r"\bHD\b", r"720"],
+        "480p": [r"480[pP]", r"\bSD\b", r"480"],
+        "4K": [r"4[kK]", r"2160[pP]", r"Ultra\s*HD"]
     }
     
     found_qualities = set()
@@ -278,9 +279,9 @@ def extract_video_metadata(caption, message_id):
     for quality in found_qualities:
         metadata["qualities"].append({"resolution": quality, "message_id": message_id})
 
-    if re.search(r"مترجم|sub|subbed|subtitle", caption, re.IGNORECASE):
+    if re.search(r"مترجم|sub|subbed|subtitle|translated|ترجمة", caption, re.IGNORECASE):
         metadata["is_translated"] = True
-    if re.search(r"مدبلج|dub|dubbed|arabic", caption, re.IGNORECASE):
+    if re.search(r"مدبلج|dub|dubbed|arabic|دبلجة", caption, re.IGNORECASE):
         metadata["is_dubbed"] = True
 
     return metadata
@@ -845,7 +846,7 @@ def create_paginated_keyboard(items, total_items, page, prefix, context):
             except:
                 pass
         
-        indicator_text = f" ({''.join(indicators)})" if indicators else ""
+        indicator_text = f" ({' '.join(indicators)})" if indicators else ""
         button_text = f"{title[:35]}{indicator_text} - {category_name} 👁 {view_count}"
         
         callback_data = f"video::{video_id}::{message_id}::{chat_id}"
@@ -915,6 +916,18 @@ def main_menu():
     list_button = KeyboardButton('🎬 عرض كل الفيديوهات')
     popular_button = KeyboardButton('🔥 الفيديوهات الشائعة')
     markup.add(list_button, popular_button)
+    return markup
+
+def admin_panel_keyboard():
+    """إنشاء لوحة تحكم الآدمن."""
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("📊 إحصائيات البوت", callback_data="admin::stats"),
+        InlineKeyboardButton("📂 إدارة التصنيفات", callback_data="admin::manage_categories"),
+        InlineKeyboardButton("📺 إضافة قناة مطلوبة", callback_data="admin::add_channel"),
+        InlineKeyboardButton("🗑️ إزالة قناة مطلوبة", callback_data="admin::remove_channel"),
+        InlineKeyboardButton("📢 إرسال إعلان للجميع", callback_data="admin::broadcast")
+    )
     return markup
 
 def search_videos(query, page=0):
@@ -994,6 +1007,13 @@ def start(message):
 def get_my_id(message):
     bot.reply_to(message, f"معرف حسابك هو: `{message.from_user.id}`", parse_mode="Markdown")
 
+@bot.message_handler(commands=["admin"])
+@check_admin
+def admin_panel(message):
+    """عرض لوحة تحكم الآدمن."""
+    markup = admin_panel_keyboard()
+    bot.reply_to(message, "🎛️ لوحة تحكم الآدمن:", reply_markup=markup)
+
 @bot.message_handler(commands=["delete_video"])
 @check_admin
 def delete_video_command(message):
@@ -1063,7 +1083,7 @@ def list_videos(message, edit_message=None, parent_id=None):
 @bot.message_handler(content_types=['text'])
 def handle_search(message):
     query = message.text.strip()
-    if query in ['🎬 عرض كل الفيديوهات', '🔥 الفيديوهات الشائعة']:
+    if query in ['🎬 عرض كل الفيديوهات', '🔥 الفيديوهات الشائعة', '/start', '/myid', '/admin', '/delete_video', '/delete_category', '/cancel']:
         return
     
     results, total_count = search_videos(query)
@@ -1088,12 +1108,149 @@ def handle_forwarded_video(message):
         )
         bot.reply_to(message, "تم إضافة الفيديو إلى الأرشيف بنجاح!")
 
+@bot.message_handler(content_types=['document'])
+def handle_forwarded_document(message):
+    if message.forward_from_chat and str(message.forward_from_chat.id) == CHANNEL_ID:
+        add_video(
+            message_id=message.forward_from_message_id,
+            caption=message.caption,
+            chat_id=message.forward_from_chat.id,
+            file_name=message.document.file_name,
+            file_id=message.document.file_id
+        )
+        bot.reply_to(message, "تم إضافة الملف إلى الأرشيف بنجاح!")
+
+def handle_add_category(message):
+    """معالجة إضافة تصنيف جديد."""
+    if check_cancel(message): return
+    name = message.text.strip()
+    success, result = add_category(name)
+    if success:
+        bot.reply_to(message, f"تم إضافة التصنيف بنجاح! ID: {result}")
+    else:
+        bot.reply_to(message, f"فشل في إضافة التصنيف: {result}")
+    bot.send_message(message.chat.id, "عودة إلى لوحة التحكم:", reply_markup=admin_panel_keyboard())
+
+def handle_add_subcategory(message, parent_id):
+    """معالجة إضافة تصنيف فرعي."""
+    if check_cancel(message): return
+    name = message.text.strip()
+    success, result = add_category(name, parent_id)
+    if success:
+        bot.reply_to(message, f"تم إضافة التصنيف الفرعي بنجاح! ID: {result}")
+    else:
+        bot.reply_to(message, f"فشل في إضافة التصنيف الفرعي: {result}")
+    bot.send_message(message.chat.id, "عودة إلى لوحة التحكم:", reply_markup=admin_panel_keyboard())
+
+def handle_add_channel(message):
+    """معالجة إضافة قناة مطلوبة."""
+    if check_cancel(message): return
+    try:
+        channel_name, display_name = message.text.strip().split(" ", 1)
+        channel_name = channel_name.replace("@", "")
+        channel_id = bot.get_chat(f"@{channel_name}").id
+        if add_required_channel(channel_id, display_name):
+            bot.reply_to(message, f"تم إضافة القناة {display_name} بنجاح!")
+        else:
+            bot.reply_to(message, "فشل في إضافة القناة!")
+    except Exception as e:
+        bot.reply_to(message, f"خطأ: {str(e)}")
+    bot.send_message(message.chat.id, "عودة إلى لوحة التحكم:", reply_markup=admin_panel_keyboard())
+
+def handle_broadcast(message):
+    """معالجة إرسال إعلان لجميع المستخدمين."""
+    if check_cancel(message): return
+    text = message.text.strip()
+    user_ids = get_all_user_ids()
+    success_count = 0
+    for user_id in user_ids:
+        try:
+            bot.send_message(user_id, text)
+            success_count += 1
+        except:
+            continue
+    bot.reply_to(message, f"تم إرسال الإعلان إلى {success_count} مستخدم!")
+    bot.send_message(message.chat.id, "عودة إلى لوحة التحكم:", reply_markup=admin_panel_keyboard())
+
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback_query(call):
     data = call.data.split(CALLBACK_DELIMITER)
     user_id = call.from_user.id
     
-    if data[0] == "cat":
+    if data[0] == "admin":
+        action = data[1]
+        if action == "stats":
+            stats = get_bot_stats()
+            subscribers = get_subscriber_count()
+            msg = (
+                f"📊 إحصائيات البوت:\n"
+                f"عدد الفيديوهات: {stats['video_count']}\n"
+                f"عدد التصنيفات: {stats['category_count']}\n"
+                f"إجمالي المشاهدات: {stats['total_views']}\n"
+                f"إجمالي التقييمات: {stats['total_ratings']}\n"
+                f"عدد المشتركين: {subscribers}"
+            )
+            bot.edit_message_text(msg, call.message.chat.id, call.message.message_id)
+        
+        elif action == "manage_categories":
+            categories = get_categories_tree()
+            if not categories:
+                bot.edit_message_text("لا توجد تصنيفات متاحة.", call.message.chat.id, call.message.message_id)
+                return
+            keyboard = InlineKeyboardMarkup(row_width=2)
+            for cat_id, cat_name, _, _ in categories:
+                keyboard.add(InlineKeyboardButton(cat_name, callback_data=f"admin::select_category::{cat_id}"))
+            keyboard.add(InlineKeyboardButton("إضافة تصنيف جديد", callback_data="admin::add_category"))
+            bot.edit_message_text("اختر تصنيفًا لإدارته أو أضف تصنيفًا جديدًا:", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+        
+        elif action == "add_category":
+            msg = bot.send_message(call.message.chat.id, "أرسل اسم التصنيف الجديد (أو /cancel للإلغاء):")
+            bot.register_next_step_handler(msg, handle_add_category)
+        
+        elif action == "select_category":
+            category_id = int(data[2])
+            category = get_category_by_id(category_id)
+            if not category:
+                bot.answer_callback_query(call.id, "التصنيف غير موجود!")
+                return
+            keyboard = InlineKeyboardMarkup(row_width=2)
+            keyboard.add(
+                InlineKeyboardButton("حذف التصنيف", callback_data=f"delete_cat::{category_id}"),
+                InlineKeyboardButton("إضافة تصنيف فرعي", callback_data=f"admin::add_subcategory::{category_id}")
+            )
+            bot.edit_message_text(f"إدارة التصنيف: {category[1]}", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+        
+        elif action == "add_subcategory":
+            category_id = int(data[2])
+            msg = bot.send_message(call.message.chat.id, f"أرسل اسم التصنيف الفرعي لـ {get_category_by_id(category_id)[1]} (أو /cancel للإلغاء):")
+            bot.register_next_step_handler(msg, lambda m: handle_add_subcategory(m, category_id))
+        
+        elif action == "add_channel":
+            msg = bot.send_message(call.message.chat.id, "أرسل معرف القناة (مثل @ChannelName) واسمها مفصولين بمسافة (أو /cancel للإلغاء):")
+            bot.register_next_step_handler(msg, handle_add_channel)
+        
+        elif action == "remove_channel":
+            channels = get_required_channels()
+            if not channels:
+                bot.edit_message_text("لا توجد قنوات مطلوبة لحذفها.", call.message.chat.id, call.message.message_id)
+                return
+            keyboard = InlineKeyboardMarkup(row_width=1)
+            for channel_id, channel_name in channels:
+                keyboard.add(InlineKeyboardButton(channel_name, callback_data=f"admin::remove_channel_id::{channel_id}"))
+            bot.edit_message_text("اختر القناة للحذف:", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+        
+        elif action == "remove_channel_id":
+            channel_id = int(data[2])
+            if remove_required_channel(channel_id):
+                bot.edit_message_text("تم إزالة القناة بنجاح.", call.message.chat.id, call.message.message_id)
+            else:
+                bot.edit_message_text("فشل في إزالة القناة!", call.message.chat.id, call.message.message_id)
+        
+        elif action == "broadcast":
+            msg = bot.send_message(call.message.chat.id, "أرسل نص الإعلان (أو /cancel للإلغاء):")
+            bot.register_next_step_handler(msg, handle_broadcast)
+    
+    elif data[0] == "cat":
         category_id, page = map(int, data[1:3])
         category = get_category_by_id(category_id)
         if not category:
@@ -1296,7 +1453,7 @@ def handle_callback_query(call):
             "تم إلغاء العملية.",
             call.message.chat.id,
             call.message.message_id,
-            reply_markup=main_menu()
+            reply_markup=admin_panel_keyboard()
         )
         if user_id in admin_steps:
             del admin_steps[user_id]
