@@ -1,16 +1,10 @@
-# ==============================================================================
-# ملف: bot_part1.py (المرحلة الأولى: الإعدادات الأساسية وتهيئة قاعدة البيانات)
-# الوصف: إعداد البوت، الاتصال بقاعدة البيانات، وإنشاء الجداول الأساسية.
-# ==============================================================================
-
 import telebot
 import psycopg2
 import os
-import time
-import re
 import json
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+import re
 from urllib.parse import urlparse
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 import math
 from datetime import datetime
 
@@ -113,8 +107,6 @@ def init_db():
         print("Database initialized successfully.")
     except Exception as e:
         print(f"Database error during init: {e}")
-        import json
-import re
 
 def migrate_old_data():
     """ترحيل البيانات القديمة من النظام القديم إلى النظام الجديد."""
@@ -292,7 +284,8 @@ def extract_video_metadata(caption, message_id):
         metadata["is_dubbed"] = True
 
     return metadata
-    def add_category(name, parent_id=None):
+
+def add_category(name, parent_id=None):
     """إضافة تصنيف جديد."""
     try:
         conn = psycopg2.connect(**DB_CONFIG)
@@ -403,7 +396,6 @@ def delete_category(category_id, target_category_id):
     except Exception as e:
         print(f"Delete category error: {e}")
         return False, str(e)
-        import json
 
 def add_video(message_id, caption, chat_id, file_name=None, category_id=None, file_id=None):
     """إضافة فيديو جديد إلى قاعدة البيانات."""
@@ -607,11 +599,6 @@ def get_videos_by_title_and_quality(title, quality):
     except Exception as e:
         print(f"Get videos by title and quality error: {e}")
         return None
-        # ==============================================================================
-# ملف: bot_part5.py (المرحلة الخامسة: إدارة التقييمات والإحصائيات)
-# الوصف: دوال لإضافة وإدارة تقييمات الفيديوهات، واسترجاع الإحصائيات.
-# ملاحظة: يجب إضافته إلى الكود من المراحل السابقة.
-# ==============================================================================
 
 def add_video_rating(video_id, user_id, rating):
     """إضافة أو تحديث تقييم فيديو."""
@@ -732,8 +719,6 @@ def get_bot_stats():
     except Exception as e:
         print(f"Get bot stats error: {e}")
         return {"video_count": 0, "category_count": 0, "total_views": 0, "total_ratings": 0}
-        from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
-import math
 
 def add_required_channel(channel_id, channel_name):
     """إضافة قناة مطلوبة إلى قاعدة البيانات."""
@@ -931,7 +916,52 @@ def main_menu():
     popular_button = KeyboardButton('🔥 الفيديوهات الشائعة')
     markup.add(list_button, popular_button)
     return markup
-    def check_cancel(message):
+
+def search_videos(query, page=0):
+    """البحث عن الفيديوهات بناءً على النص."""
+    offset = page * VIDEOS_PER_PAGE
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        c = conn.cursor()
+        
+        def normalize_text(text):
+            if not text:
+                return ""
+            text = text.replace('أ', 'ا').replace('إ', 'ا').replace('آ', 'ا')
+            text = text.replace('ة', 'ه').replace('ى', 'ي')
+            return text
+
+        normalized_query = normalize_text(query)
+        search_param = '%' + normalized_query + '%'
+        
+        c.execute("""
+            SELECT COUNT(*) 
+            FROM video_archive va
+            LEFT JOIN categories cat ON va.category_id = cat.id
+            WHERE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(va.caption, 'أ', 'ا'), 'إ', 'ا'), 'آ', 'ا'), 'ة', 'ه'), 'ى', 'ي') ILIKE %s
+               OR REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(va.file_name, 'أ', 'ا'), 'إ', 'ا'), 'آ', 'ا'), 'ة', 'ه'), 'ى', 'ي') ILIKE %s
+        """, (search_param, search_param))
+        total_count = c.fetchone()[0]
+        
+        c.execute("""
+            SELECT va.id, va.message_id, va.caption, va.chat_id, va.file_name, va.metadata, 
+                   COALESCE(cat.name, 'Uncategorized') as category_name, va.view_count
+            FROM video_archive va
+            LEFT JOIN categories cat ON va.category_id = cat.id
+            WHERE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(va.caption, 'أ', 'ا'), 'إ', 'ا'), 'آ', 'ا'), 'ة', 'ه'), 'ى', 'ي') ILIKE %s
+               OR REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(va.file_name, 'أ', 'ا'), 'إ', 'ا'), 'آ', 'ا'), 'ة', 'ه'), 'ى', 'ي') ILIKE %s
+            ORDER BY va.id
+            LIMIT %s OFFSET %s
+        """, (search_param, search_param, VIDEOS_PER_PAGE, offset))
+        
+        videos = c.fetchall()
+        conn.close()
+        return videos, total_count
+    except Exception as e:
+        print(f"Search videos error: {e}")
+        return [], 0
+
+def check_cancel(message):
     """التحقق من إلغاء العملية."""
     if message.text == "/cancel":
         bot.reply_to(message, "تم إلغاء العملية.", reply_markup=main_menu())
