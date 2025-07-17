@@ -1,16 +1,15 @@
 # ==============================================================================
-# ملف: bot.py (النسخة النهائية الكاملة مع الترحيل التلقائي)
-# الوصف: هذا هو السكربت الكامل والجاهز للتشغيل. يقوم بإنشاء قاعدة البيانات
-#        بالهيكل الصحيح، ثم يقوم بترحيل جميع بياناتك القديمة من الجداول
-#        التي تم تغيير اسمها (video_archive_old, video_ratings_old).
+# ملف: bot.py (النسخة النهائية الكاملة مع ميزة اختيار الجودة)
+# الوصف: هذا هو السكربت الكامل والجاهز للتشغيل. تم إزالة كود الترحيل
+#        وإضافة ميزة اختيار جودة الفيديو قبل الإرسال.
 #
 # تم تطبيق التحسينات التالية:
 # 1. إدارة الاتصال بقاعدة البيانات: استخدام Connection Pooling لضمان
 #    أعلى كفاءة واستقرار للبوت.
-# 2. ترحيل البيانات: دالة ترحيل قوية ومفصلة تقوم بنقل كل شيء
-#    من الجداول القديمة إلى الجديدة تلقائيًا.
+# 2. ميزة اختيار الجودة: عند الضغط على فيديو، يعرض البوت أزرارًا
+#    بالجودات المتاحة للاختيار منها.
 # 3. تسجيل الأخطاء: استخدام نظام logging احترافي لتتبع كل ما يحدث.
-# 4. إصلاح خطأ PoolError: تم تحسين دالة get_db_connection لمعالجة الأخطاء بشكل آمن.
+# 4. إزالة كود الترحيل القديم لتجنب الأخطاء.
 # ==============================================================================
 
 import telebot
@@ -65,7 +64,6 @@ except Exception as e:
 def get_db_connection():
     """
     دالة مساعدة للحصول على اتصال من الـ pool وإعادته عند الانتهاء.
-    تم تحسينها لتجنب أخطاء PoolError.
     """
     conn = None
     try:
@@ -81,161 +79,63 @@ user_last_search = {}
 VIDEOS_PER_PAGE = 10
 CALLBACK_DELIMITER = "::"
 
-# --- دوال قاعدة البيانات والترحيل ---
+# --- دوال قاعدة البيانات ---
 
-def init_db():
-    """إنشاء الجداول اللازمة بالهيكل الجديد إذا لم تكن موجودة."""
-    logger.info("Initializing new database schema if not exists...")
+def get_video_by_id(video_id):
+    """الحصول على بيانات فيديو واحد بواسطة ID الخاص به."""
     try:
         with get_db_connection() as conn:
             with conn.cursor() as c:
-                c.execute("""
-                    CREATE TABLE IF NOT EXISTS categories (
-                        id SERIAL PRIMARY KEY,
-                        name TEXT NOT NULL,
-                        parent_id INTEGER REFERENCES categories(id) ON DELETE CASCADE,
-                        full_path TEXT NOT NULL UNIQUE
-                    )
-                """)
-                c.execute("""
-                    CREATE TABLE IF NOT EXISTS video_archive (
-                        id SERIAL PRIMARY KEY,
-                        message_id BIGINT UNIQUE,
-                        caption TEXT,
-                        chat_id BIGINT,
-                        file_name TEXT,
-                        category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
-                        metadata JSONB DEFAULT '{}'::jsonb,
-                        view_count INTEGER DEFAULT 0,
-                        file_id TEXT
-                    )
-                """)
-                c.execute("""
-                    CREATE TABLE IF NOT EXISTS video_ratings (
-                        id SERIAL PRIMARY KEY,
-                        video_id INTEGER REFERENCES video_archive(id) ON DELETE CASCADE NOT NULL,
-                        user_id BIGINT NOT NULL,
-                        rating INTEGER CHECK (rating >= 1 AND rating <= 5),
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        UNIQUE(video_id, user_id)
-                    )
-                """)
-                # الجداول التي لا يتغير هيكلها
-                c.execute("CREATE TABLE IF NOT EXISTS bot_settings (setting_key TEXT PRIMARY KEY, setting_value TEXT)")
-                c.execute("CREATE TABLE IF NOT EXISTS bot_users (user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT, join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
-                c.execute("CREATE TABLE IF NOT EXISTS required_channels (channel_id BIGINT PRIMARY KEY, channel_name TEXT)")
-                conn.commit()
-                logger.info("Database schema check/initialization complete.")
+                c.execute("SELECT id, message_id, caption, chat_id, file_name FROM video_archive WHERE id = %s", (video_id,))
+                return c.fetchone()
     except Exception as e:
-        logger.error(f"Database error during init_db: {e}", exc_info=True)
-        raise
+        logger.error(f"Get video by id error: {e}")
+        return None
 
-def run_migration():
+def find_video_qualities(video_id):
     """
-    دالة شاملة لتشغيل عملية الترحيل الكاملة للبيانات القديمة.
+    البحث عن جميع الجودات المتاحة لفيديو معين بناءً على اسمه الأساسي.
     """
     try:
         with get_db_connection() as conn:
             with conn.cursor() as c:
-                c.execute("SELECT setting_value FROM bot_settings WHERE setting_key = 'migration_complete'")
-                if c.fetchone():
-                    logger.info("Migration has already been completed. Skipping.")
-                    return
+                # أولاً، احصل على اسم الفيديو الأصلي
+                c.execute("SELECT caption, file_name FROM video_archive WHERE id = %s", (video_id,))
+                original_video = c.fetchone()
+                if not original_video:
+                    return []
+
+                original_caption, original_file_name = original_video
+                base_name = (original_caption or original_file_name or "").strip().split('\n')[0]
                 
-                logger.info("Starting data migration process...")
-                _migrate_categories(c)
-                _migrate_videos(c)
-                _migrate_ratings(c)
+                # إزالة الكلمات الدالة على الجودة من الاسم للبحث
+                quality_indicators = [r'\b1080p\b', r'\b720p\b', r'\b480p\b', r'\bhd\b', r'\bfhd\b', r'\bsd\b']
+                for indicator in quality_indicators:
+                    base_name = re.sub(indicator, '', base_name, flags=re.IGNORECASE).strip()
                 
-                c.execute("INSERT INTO bot_settings (setting_key, setting_value) VALUES ('migration_complete', 'true') ON CONFLICT (setting_key) DO NOTHING")
-                conn.commit()
-                logger.info("✅✅✅ Full data migration completed successfully! ✅✅✅")
-    except Exception as e:
-        logger.critical(f"A critical error occurred during migration: {e}", exc_info=True)
+                # إزالة أي أرقام تعريفية أو كلمات إضافية قد تكون في النهاية
+                base_name = re.sub(r'\[.*?\]', '', base_name).strip() # Remove content in brackets
+                base_name = re.sub(r'\(.*?\)', '', base_name).strip() # Remove content in parentheses
+                base_name = base_name.split('-')[0].strip() # Split by hyphen and take first part
 
-def _migrate_categories(c):
-    """ترحيل التصنيفات القديمة من جدول video_archive_old."""
-    logger.info("Step 1: Migrating categories from 'video_archive_old'...")
-    try:
-        c.execute("SELECT DISTINCT category FROM video_archive_old WHERE category IS NOT NULL AND category != ''")
-        old_categories = [row[0] for row in c.fetchall()]
-        logger.info(f"Found {len(old_categories)} unique old categories.")
-        for cat_name in old_categories:
-            full_path = f"/{cat_name}/"
-            c.execute("INSERT INTO categories (name, parent_id, full_path) VALUES (%s, NULL, %s) ON CONFLICT (full_path) DO NOTHING", (cat_name, full_path))
-        c.execute("INSERT INTO categories (name, parent_id, full_path) VALUES ('Uncategorized', NULL, '/Uncategorized/') ON CONFLICT (full_path) DO NOTHING")
-        c.connection.commit()
-        logger.info("Categories migration step finished.")
-    except psycopg2.errors.UndefinedTable:
-        logger.warning("Table 'video_archive_old' not found. Skipping category migration.")
-    except Exception as e:
-        logger.error(f"Error in _migrate_categories: {e}", exc_info=True)
-        c.connection.rollback()
-        raise
+                if not base_name:
+                    return []
 
-def _migrate_videos(c):
-    """ترحيل الفيديوهات من video_archive_old إلى video_archive الجديد."""
-    logger.info("Step 2: Migrating videos from 'video_archive_old'...")
-    try:
-        c.execute("SELECT message_id, caption, chat_id, file_name, category, file_id FROM video_archive_old")
-        old_videos = c.fetchall()
-        logger.info(f"Found {len(old_videos)} videos to migrate.")
-
-        c.execute("SELECT id, name FROM categories")
-        categories_map = {name: cat_id for cat_id, name in c.fetchall()}
-        uncategorized_id = categories_map.get('Uncategorized')
-
-        migrated_count = 0
-        for message_id, caption, chat_id, file_name, category_name, file_id_val in old_videos:
-            category_id = categories_map.get(category_name, uncategorized_id)
-            metadata = extract_video_metadata(caption)
-            c.execute("""
-                INSERT INTO video_archive (message_id, caption, chat_id, file_name, category_id, metadata, file_id, view_count)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, 0)
-                ON CONFLICT (message_id) DO NOTHING
-            """, (message_id, caption, chat_id, file_name, category_id, json.dumps(metadata), file_id_val))
-            migrated_count += c.rowcount
-        
-        c.connection.commit()
-        logger.info(f"Successfully migrated {migrated_count} videos.")
-    except psycopg2.errors.UndefinedTable:
-        logger.warning("Table 'video_archive_old' not found. Skipping video migration.")
-    except Exception as e:
-        logger.error(f"Error in _migrate_videos: {e}", exc_info=True)
-        c.connection.rollback()
-        raise
-
-def _migrate_ratings(c):
-    """ترحيل التقييمات القديمة من جدول video_ratings_old."""
-    logger.info("Step 3: Migrating old ratings from 'video_ratings_old'...")
-    try:
-        c.execute("SELECT message_id, user_id, rating FROM video_ratings_old")
-        old_ratings = c.fetchall()
-        logger.info(f"Found {len(old_ratings)} old ratings to migrate.")
-        
-        migrated_count = 0
-        for message_id, user_id, rating in old_ratings:
-            c.execute("SELECT id FROM video_archive WHERE message_id = %s", (message_id,))
-            video_res = c.fetchone()
-            if video_res:
-                video_id = video_res[0]
+                # البحث عن كل الفيديوهات التي تشبه الاسم الأساسي
+                search_pattern = f"%{base_name}%"
                 c.execute("""
-                    INSERT INTO video_ratings (video_id, user_id, rating) VALUES (%s, %s, %s)
-                    ON CONFLICT (video_id, user_id) DO NOTHING
-                """, (video_id, user_id, rating))
-                migrated_count += c.rowcount
-            else:
-                logger.warning(f"Could not find video with message_id {message_id} for rating. Skipping.")
-        
-        c.connection.commit()
-        logger.info(f"Successfully migrated {migrated_count} ratings.")
-    except psycopg2.errors.UndefinedTable:
-        logger.warning("Table 'video_ratings_old' not found. Skipping ratings migration.")
+                    SELECT id, message_id, caption, chat_id, file_name
+                    FROM video_archive
+                    WHERE caption ILIKE %s OR file_name ILIKE %s
+                """, (search_pattern, search_pattern))
+                
+                return c.fetchall()
     except Exception as e:
-        logger.error(f"Error in _migrate_ratings: {e}", exc_info=True)
-        c.connection.rollback()
-        raise
+        logger.error(f"Error finding video qualities for video_id {video_id}: {e}")
+        return []
 
+# --- باقي دوال قاعدة البيانات (تبقى كما هي) ---
+# ... (تم إدراج جميع الدوال الأخرى هنا ليكون الملف كاملاً) ...
 def extract_video_metadata(caption):
     """استخلاص البيانات الوصفية من كابشن الفيديو."""
     metadata = {"qualities": [], "is_translated": False, "is_dubbed": False}
@@ -625,7 +525,7 @@ def create_paginated_keyboard(items, total_items, page, prefix, context):
         indicator_text = f" ({', '.join(indicators)})" if indicators else ""
         button_text = f"{title[:35]}...{indicator_text} - {category_name} 👁 {view_count}"
         
-        keyboard.add(InlineKeyboardButton(text=button_text, callback_data=f"video::{video_id}::{message_id}::{chat_id}"))
+        keyboard.add(InlineKeyboardButton(text=button_text, callback_data=f"video::{video_id}"))
 
     total_pages = math.ceil(total_items / VIDEOS_PER_PAGE)
     if total_pages > 1:
@@ -836,12 +736,53 @@ def callback_query(call):
             list_videos(call.message, edit_message=call.message)
 
         elif action == "video":
-            _, video_id, message_id, chat_id = data
-            increment_video_view_count(int(video_id))
-            bot.copy_message(call.message.chat.id, chat_id, int(message_id))
-            rating_keyboard = create_video_action_keyboard(int(video_id), user_id)
-            bot.send_message(call.message.chat.id, "ما هو تقييمك لهذا الفيديو؟", reply_markup=rating_keyboard)
+            _, video_id_str = data
+            video_id = int(video_id_str)
+            
+            qualities = find_video_qualities(video_id)
+            
+            if not qualities:
+                bot.answer_callback_query(call.id, "لم يتم العثور على الفيديو.", show_alert=True)
+                return
+
+            if len(qualities) == 1:
+                # إرسال الفيديو مباشرة إذا كانت هناك جودة واحدة فقط
+                vid_id, msg_id, caption, chat_id, file_name = qualities[0]
+                increment_video_view_count(vid_id)
+                bot.copy_message(call.message.chat.id, chat_id, msg_id)
+                rating_keyboard = create_video_action_keyboard(vid_id, user_id)
+                bot.send_message(call.message.chat.id, "ما هو تقييمك لهذا الفيديو؟", reply_markup=rating_keyboard)
+            else:
+                # عرض أزرار اختيار الجودة
+                keyboard = InlineKeyboardMarkup()
+                for vid_id, msg_id, caption, chat_id, file_name in qualities:
+                    # استخلاص الجودة من الكابشن أو اسم الملف
+                    full_text = caption or file_name or ""
+                    quality = "جودة غير معروفة"
+                    if "1080p" in full_text.lower() or "fhd" in full_text.lower(): quality = "1080p"
+                    elif "720p" in full_text.lower() or "hd" in full_text.lower(): quality = "720p"
+                    elif "480p" in full_text.lower() or "sd" in full_text.lower(): quality = "480p"
+                    
+                    keyboard.add(InlineKeyboardButton(
+                        f"تحميل بجودة {quality}",
+                        callback_data=f"download::{vid_id}"
+                    ))
+                bot.send_message(call.message.chat.id, "هذا الفيديو متوفر بعدة جودات، اختر واحدة:", reply_markup=keyboard)
+
             bot.answer_callback_query(call.id)
+
+        elif action == "download":
+            _, video_id_str = data
+            video_data = get_video_by_id(int(video_id_str))
+            if video_data:
+                vid_id, msg_id, caption, chat_id, file_name = video_data
+                increment_video_view_count(vid_id)
+                bot.copy_message(call.message.chat.id, chat_id, msg_id)
+                rating_keyboard = create_video_action_keyboard(vid_id, user_id)
+                bot.send_message(call.message.chat.id, "ما هو تقييمك لهذا الفيديو؟", reply_markup=rating_keyboard)
+            else:
+                bot.answer_callback_query(call.id, "خطأ في تحميل الفيديو.", show_alert=True)
+
 
         elif action == "rate":
             _, video_id, rating = data
@@ -867,17 +808,24 @@ def callback_query(call):
 if __name__ == "__main__":
     logger.info("Bot starting up...")
     
-    # الخطوة 1: تأكد من أن هيكل قاعدة البيانات الجديد موجود
-    init_db()
-    
-    # الخطوة 2: قم بتشغيل عملية الترحيل.
-    run_migration()
+    # لا حاجة للترحيل الآن لأن قاعدة البيانات محدثة
+    # init_db()
+    # run_migration()
     
     logger.info("Bot is now polling for messages...")
     while True:
         try:
-            bot.polling(non_stop=True, interval=1)
+            # إضافة non_stop=False و timeout يساعد في تجنب بعض الأخطاء
+            bot.polling(none_stop=True, interval=0, timeout=20)
+        except telebot.apihelper.ApiTelegramException as e:
+            if "Conflict" in e.description:
+                logger.critical("CONFLICT ERROR (409): Another instance of the bot is running. Stopping this instance.")
+                break # أوقف هذه النسخة تمامًا
+            else:
+                logger.error(f"Telegram API Error: {e}")
+                time.sleep(10)
         except Exception as e:
             logger.error(f"An error occurred in the main polling loop: {e}", exc_info=True)
             logger.info("Restarting in 15 seconds...")
             time.sleep(15)
+
