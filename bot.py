@@ -13,9 +13,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 ADMIN_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS", "").split(",") if admin_id]
+GROUP_ID = os.getenv("GROUP_ID")  # معرف الجروب الجديد
 
-if not all([BOT_TOKEN, DATABASE_URL, CHANNEL_ID, ADMIN_IDS]):
-    print("FATAL ERROR: Missing one or more environment variables (BOT_TOKEN, DATABASE_URL, CHANNEL_ID, ADMIN_IDS).")
+if not all([BOT_TOKEN, DATABASE_URL, CHANNEL_ID, GROUP_ID, ADMIN_IDS]):
+    print("FATAL ERROR: Missing one or more environment variables (BOT_TOKEN, DATABASE_URL, CHANNEL_ID, GROUP_ID, ADMIN_IDS).")
     exit()
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -318,6 +319,95 @@ def add_category(name, parent_id=None):
         print(f"Add category error: {e}")
         return False, str(e)
 
+def rename_category(category_id, new_name):
+    """إعادة تسمية تصنيف."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        c = conn.cursor()
+        
+        c.execute("SELECT parent_id, full_path FROM categories WHERE id = %s", (category_id,))
+        result = c.fetchone()
+        if not result:
+            return False, "التصنيف غير موجود"
+        
+        parent_id, old_full_path = result
+        if parent_id:
+            c.execute("SELECT full_path FROM categories WHERE id = %s", (parent_id,))
+            parent_path = c.fetchone()
+            if parent_path:
+                new_full_path = f"{parent_path[0]}{new_name}/"
+            else:
+                return False, "التصنيف الأب غير موجود"
+        else:
+            new_full_path = f"/{new_name}/"
+        
+        c.execute("""
+            UPDATE categories 
+            SET name = %s, full_path = %s
+            WHERE id = %s
+        """, (new_name, new_full_path, category_id))
+        
+        c.execute("""
+            UPDATE categories 
+            SET full_path = %s || substring(full_path from %s)
+            WHERE full_path LIKE %s
+        """, (new_full_path, len(old_full_path) + 1, old_full_path + '%'))
+        
+        conn.commit()
+        conn.close()
+        return True, "تم إعادة تسمية التصنيف بنجاح"
+    except psycopg2.IntegrityError:
+        return False, "اسم التصنيف موجود بالفعل"
+    except Exception as e:
+        print(f"Rename category error: {e}")
+        return False, str(e)
+
+def move_videos(source_category_id, target_category_id):
+    """نقل جميع الفيديوهات من تصنيف إلى تصنيف آخر."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        c = conn.cursor()
+        
+        c.execute("SELECT COUNT(*) FROM video_archive WHERE category_id = %s", (source_category_id,))
+        video_count = c.fetchone()[0]
+        
+        c.execute("""
+            UPDATE video_archive 
+            SET category_id = %s 
+            WHERE category_id = %s
+        """, (target_category_id, source_category_id))
+        
+        conn.commit()
+        conn.close()
+        return True, f"تم نقل {video_count} فيديو إلى التصنيف الجديد."
+    except Exception as e:
+        print(f"Move videos error: {e}")
+        return False, str(e)
+
+def move_single_video(message_id, target_category_id):
+    """نقل فيديو فردي إلى تصنيف آخر."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        c = conn.cursor()
+        
+        c.execute("SELECT id FROM video_archive WHERE message_id = %s", (message_id,))
+        video = c.fetchone()
+        if not video:
+            return False, "الفيديو غير موجود."
+        
+        c.execute("""
+            UPDATE video_archive 
+            SET category_id = %s 
+            WHERE message_id = %s
+        """, (target_category_id, message_id))
+        
+        conn.commit()
+        conn.close()
+        return True, "تم نقل الفيديو بنجاح."
+    except Exception as e:
+        print(f"Move single video error: {e}")
+        return False, str(e)
+
 def get_categories_tree():
     """الحصول على شجرة التصنيفات."""
     try:
@@ -398,16 +488,14 @@ def delete_category(category_id, target_category_id):
         print(f"Delete category error: {e}")
         return False, str(e)
 
-def add_video(message_id, caption, chat_id, file_name=None, category_id=None, file_id=None):
+def add_video(message_id, caption, chat_id, file_name=None, file_id=None):
     """إضافة فيديو جديد إلى قاعدة البيانات."""
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         c = conn.cursor()
         
         metadata = extract_video_metadata(caption, message_id)
-        
-        if not category_id:
-            category_id = get_active_category_id()
+        category_id = get_active_category_id()
         
         c.execute("""
             INSERT INTO video_archive (message_id, caption, chat_id, file_name, category_id, metadata, file_id) 
@@ -588,8 +676,8 @@ def get_videos_by_title_and_quality(title, quality):
                    COALESCE(cat.name, 'Uncategorized') as category_name, va.view_count
             FROM video_archive va
             LEFT JOIN categories cat ON va.category_id = cat.id
-            WHERE (REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(va.caption, 'أ', 'ا'), 'إ', 'ا'), 'آ', 'ا'), 'ة', 'ه'), 'ى', 'ي') ILIKE %s
-                   OR REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(va.file_name, 'أ', 'ا'), 'إ', 'ا'), 'آ', 'ا'), 'ة', 'ه'), 'ى', 'ي') ILIKE %s)
+            WHERE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(va.caption, 'أ', 'ا'), 'إ', 'ا'), 'آ', 'ا'), 'ة', 'ه'), 'ى', 'ي') ILIKE %s
+                   OR REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(va.file_name, 'أ', 'ا'), 'إ', 'ا'), 'آ', 'ا'), 'ة', 'ه'), 'ى', 'ي') ILIKE %s
                    AND va.metadata->'qualities' @> %s::jsonb
             LIMIT 1
         """, (search_param, search_param, json.dumps([{"resolution": quality}])))
@@ -1030,6 +1118,30 @@ def handle_delete_video(message):
         msg = bot.reply_to(message, "معرف الرسالة غير صالح. يرجى إرسال رقم صحيح. (أو أرسل /cancel للإلغاء)")
         bot.register_next_step_handler(msg, handle_delete_video)
 
+@bot.message_handler(commands=["move_video"])
+@check_admin
+def move_video_command(message):
+    msg = bot.reply_to(message, "أرسل معرف الرسالة (message_id) للفيديو الذي تريد نقله. (أو أرسل /cancel للإلغاء)")
+    bot.register_next_step_handler(msg, handle_move_video_step1)
+
+def handle_move_video_step1(message):
+    if check_cancel(message): return
+    try:
+        message_id = int(message.text.strip())
+        admin_steps[message.from_user.id] = {'message_id': message_id}
+        categories = get_categories_tree()
+        if not categories:
+            bot.reply_to(message, "لا توجد تصنيفات متاحة.")
+            return
+        keyboard = InlineKeyboardMarkup(row_width=2)
+        for cat_id, cat_name, _, _ in categories:
+            keyboard.add(InlineKeyboardButton(cat_name, callback_data=f"move_video::{message_id}::{cat_id}"))
+        keyboard.add(InlineKeyboardButton("إلغاء", callback_data="cancel_admin"))
+        bot.reply_to(message, "اختر التصنيف الذي تريد نقل الفيديو إليه:", reply_markup=keyboard)
+    except ValueError:
+        msg = bot.reply_to(message, "معرف الرسالة غير صالح. يرجى إرسال رقم صحيح. (أو أرسل /cancel للإلغاء)")
+        bot.register_next_step_handler(msg, handle_move_video_step1)
+
 @bot.message_handler(commands=["delete_category"])
 @check_admin
 def delete_category_command(message):
@@ -1080,25 +1192,9 @@ def list_videos(message, edit_message=None, parent_id=None):
         else:
             bot.reply_to(message, text)
 
-@bot.message_handler(content_types=['text'])
-def handle_search(message):
-    query = message.text.strip()
-    if query in ['🎬 عرض كل الفيديوهات', '🔥 الفيديوهات الشائعة', '/start', '/myid', '/admin', '/delete_video', '/delete_category', '/cancel']:
-        return
-    
-    results, total_count = search_videos(query)
-    user_last_search[message.from_user.id] = {'query': query, 'category_id': None}
-    
-    if not results:
-        bot.reply_to(message, "لم يتم العثور على فيديوهات مطابقة.")
-        return
-    
-    keyboard = create_paginated_keyboard(results, total_count, 0, "search", query)
-    bot.reply_to(message, f"نتائج البحث عن: {query}", reply_markup=keyboard)
-
 @bot.message_handler(content_types=['video'])
 def handle_forwarded_video(message):
-    if message.forward_from_chat and str(message.forward_from_chat.id) == CHANNEL_ID:
+    if message.forward_from_chat and str(message.forward_from_chat.id) in [CHANNEL_ID, GROUP_ID]:
         add_video(
             message_id=message.forward_from_message_id,
             caption=message.caption,
@@ -1110,7 +1206,7 @@ def handle_forwarded_video(message):
 
 @bot.message_handler(content_types=['document'])
 def handle_forwarded_document(message):
-    if message.forward_from_chat and str(message.forward_from_chat.id) == CHANNEL_ID:
+    if message.forward_from_chat and str(message.forward_from_chat.id) in [CHANNEL_ID, GROUP_ID]:
         add_video(
             message_id=message.forward_from_message_id,
             caption=message.caption,
@@ -1119,6 +1215,22 @@ def handle_forwarded_document(message):
             file_id=message.document.file_id
         )
         bot.reply_to(message, "تم إضافة الملف إلى الأرشيف بنجاح!")
+
+@bot.message_handler(content_types=['text'])
+def handle_search(message):
+    query = message.text.strip()
+    if query in ['🎬 عرض كل الفيديوهات', '🔥 الفيديوهات الشائعة', '/start', '/myid', '/admin', '/delete_video', '/delete_category', '/move_video', '/cancel']:
+        return
+    
+    results, total_count = search_videos(query)
+    user_last_search[message.from_user.id] = {'query': query, 'category_id': None}
+    
+    if not results:
+        bot.reply_to(message, "لم يتم العثور على فيديوهات مطابقة.")
+        return
+    
+    keyboard = create_paginated_keyboard(results, total_count, 0, "search", query)
+    bot.reply_to(message, f"نتائج البحث عن: {query}", reply_markup=keyboard)
 
 def handle_add_category(message):
     """معالجة إضافة تصنيف جديد."""
@@ -1140,6 +1252,17 @@ def handle_add_subcategory(message, parent_id):
         bot.reply_to(message, f"تم إضافة التصنيف الفرعي بنجاح! ID: {result}")
     else:
         bot.reply_to(message, f"فشل في إضافة التصنيف الفرعي: {result}")
+    bot.send_message(message.chat.id, "عودة إلى لوحة التحكم:", reply_markup=admin_panel_keyboard())
+
+def handle_rename_category(message, category_id):
+    """معالجة إعادة تسمية تصنيف."""
+    if check_cancel(message): return
+    new_name = message.text.strip()
+    success, result = rename_category(category_id, new_name)
+    if success:
+        bot.reply_to(message, result)
+    else:
+        bot.reply_to(message, f"فشل في إعادة تسمية التصنيف: {result}")
     bot.send_message(message.chat.id, "عودة إلى لوحة التحكم:", reply_markup=admin_panel_keyboard())
 
 def handle_add_channel(message):
@@ -1216,7 +1339,10 @@ def handle_callback_query(call):
             keyboard = InlineKeyboardMarkup(row_width=2)
             keyboard.add(
                 InlineKeyboardButton("حذف التصنيف", callback_data=f"delete_cat::{category_id}"),
-                InlineKeyboardButton("إضافة تصنيف فرعي", callback_data=f"admin::add_subcategory::{category_id}")
+                InlineKeyboardButton("إضافة تصنيف فرعي", callback_data=f"admin::add_subcategory::{category_id}"),
+                InlineKeyboardButton("إعادة تسمية", callback_data=f"admin::rename_category::{category_id}"),
+                InlineKeyboardButton("تعيين كتصنيف رئيسي", callback_data=f"admin::set_main_category::{category_id}"),
+                InlineKeyboardButton("نقل جميع الفيديوهات", callback_data=f"admin::move_videos::{category_id}")
             )
             bot.edit_message_text(f"إدارة التصنيف: {category[1]}", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
         
@@ -1224,6 +1350,49 @@ def handle_callback_query(call):
             category_id = int(data[2])
             msg = bot.send_message(call.message.chat.id, f"أرسل اسم التصنيف الفرعي لـ {get_category_by_id(category_id)[1]} (أو /cancel للإلغاء):")
             bot.register_next_step_handler(msg, lambda m: handle_add_subcategory(m, category_id))
+        
+        elif action == "rename_category":
+            category_id = int(data[2])
+            msg = bot.send_message(call.message.chat.id, f"أرسل الاسم الجديد للتصنيف (أو /cancel للإلغاء):")
+            bot.register_next_step_handler(msg, lambda m: handle_rename_category(m, category_id))
+        
+        elif action == "set_main_category":
+            category_id = int(data[2])
+            if set_active_category_id(category_id):
+                category = get_category_by_id(category_id)
+                bot.edit_message_text(
+                    f"تم تعيين '{category[1]}' كتصنيف رئيسي للفيديوهات الجديدة.",
+                    call.message.chat.id,
+                    call.message.message_id
+                )
+            else:
+                bot.edit_message_text(
+                    "فشل في تعيين التصنيف الرئيسي!",
+                    call.message.chat.id,
+                    call.message.message_id
+                )
+        
+        elif action == "move_videos":
+            source_category_id = int(data[2])
+            categories = get_categories_tree()
+            if not categories:
+                bot.edit_message_text("لا توجد تصنيفات متاحة للنقل.", call.message.chat.id, call.message.message_id)
+                return
+            keyboard = InlineKeyboardMarkup(row_width=2)
+            for cat_id, cat_name, _, _ in categories:
+                if cat_id != source_category_id:
+                    keyboard.add(InlineKeyboardButton(cat_name, callback_data=f"admin::transfer_videos::{source_category_id}::{cat_id}"))
+            keyboard.add(InlineKeyboardButton("إلغاء", callback_data="cancel_admin"))
+            bot.edit_message_text("اختر التصنيف الذي تريد نقل الفيديوهات إليه:", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+        
+        elif action == "transfer_videos":
+            source_category_id, target_category_id = map(int, data[2:4])
+            success, result = move_videos(source_category_id, target_category_id)
+            bot.edit_message_text(
+                result,
+                call.message.chat.id,
+                call.message.message_id
+            )
         
         elif action == "add_channel":
             msg = bot.send_message(call.message.chat.id, "أرسل معرف القناة (مثل @ChannelName) واسمها مفصولين بمسافة (أو /cancel للإلغاء):")
@@ -1447,6 +1616,17 @@ def handle_callback_query(call):
             call.message.chat.id,
             call.message.message_id
         )
+    
+    elif data[0] == "move_video":
+        message_id, target_category_id = map(int, data[1:3])
+        success, result = move_single_video(message_id, target_category_id)
+        bot.edit_message_text(
+            result,
+            call.message.chat.id,
+            call.message.message_id
+        )
+        if success:
+            bot.send_message(call.message.chat.id, "عودة إلى لوحة التحكم:", reply_markup=admin_panel_keyboard())
     
     elif data[0] == "cancel_admin":
         bot.edit_message_text(
