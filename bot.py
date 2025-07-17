@@ -10,6 +10,7 @@
 # 2. ترحيل البيانات: دالة ترحيل قوية ومفصلة تقوم بنقل كل شيء
 #    من الجداول القديمة إلى الجديدة تلقائيًا.
 # 3. تسجيل الأخطاء: استخدام نظام logging احترافي لتتبع كل ما يحدث.
+# 4. إصلاح خطأ PoolError: تم تحسين دالة get_db_connection لمعالجة الأخطاء بشكل آمن.
 # ==============================================================================
 
 import telebot
@@ -64,16 +65,12 @@ except Exception as e:
 def get_db_connection():
     """
     دالة مساعدة للحصول على اتصال من الـ pool وإعادته عند الانتهاء.
+    تم تحسينها لتجنب أخطاء PoolError.
     """
     conn = None
     try:
         conn = db_pool.getconn()
         yield conn
-    except Exception as e:
-        logger.error(f"Database connection error: {e}", exc_info=True)
-        if conn:
-            db_pool.putconn(conn, close=True)
-        raise
     finally:
         if conn:
             db_pool.putconn(conn)
