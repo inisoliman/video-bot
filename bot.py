@@ -8,7 +8,7 @@ import telebot
 import os
 import time
 
-#from db_manager import init_db, migrate_old_data
+from db_manager import init_db, migrate_old_data
 from handlers import register_handlers
 
 # --- الإعدادات الأساسية (قراءة آمنة من متغيرات البيئة) ---
