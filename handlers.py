@@ -335,10 +335,9 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
 
     # --- معالجات الرسائل العامة ---
 
-    @bot.message_handler(content_types=["text"])
-    def handle_text_search(message):
-        """يعرض خيارات البحث للمستخدم."""
-        if message.text.startswith("/"): return
+    @bot.message_handler(func=lambda message: message.text and not message.text.startswith("/") and message.chat.type == "private")
+    def handle_private_text_search(message):
+        """يعرض خيارات البحث للمستخدم في الدردشات الخاصة."""
         query = message.text.strip()
         
         user_last_search[message.chat.id] = query
@@ -352,6 +351,28 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
             keyboard.add(InlineKeyboardButton(f"بحث في: {cat_name}", callback_data=f"search_scope::{cat_id}"))
             
         bot.reply_to(message, f"أين تريد البحث عن \"{query}\"؟", reply_markup=keyboard)
+
+    @bot.message_handler(commands=["search"])
+    def handle_search_command(message):
+        """معالج أمر البحث في المجموعات والخاص."""
+        if message.chat.type == "private":
+            msg = bot.reply_to(message, "أرسل الكلمة المفتاحية للبحث عن الفيديوهات:")
+            bot.register_next_step_handler(msg, handle_private_text_search)
+        else: # Group chat
+            if len(message.text.split()) > 1:
+                query = " ".join(message.text.split()[1:])
+                perform_group_search(message, query)
+            else:
+                msg = bot.reply_to(message, "يرجى إدخال كلمة البحث بعد الأمر /search (مثال: /search فيلم أكشن)")
+
+    def perform_group_search(message, query):
+        user_last_search[message.chat.id] = query
+        videos, total_count = search_videos(query, page=0)
+        if not videos:
+            bot.reply_to(message, f"لم يتم العثور على نتائج للبحث عن \"{query}\".")
+            return
+        keyboard = create_paginated_keyboard(videos, total_count, 0, "search_all", "all")
+        bot.reply_to(message, f"نتائج البحث عن \"{query}\":", reply_markup=keyboard)
 
     @bot.message_handler(content_types=["video"])
     def handle_new_video(message):
@@ -508,29 +529,41 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                         return
                     
                     metadata = json.loads(video[4]) if isinstance(video[4], str) else video[4]
-                    qualities = metadata.get("qualities", [])
+                    video_details = metadata.get("video_details", {})
                     
-                    if len(qualities) > 1:
-                        keyboard = InlineKeyboardMarkup()
-                        for quality in qualities:
-                            res = quality["resolution"]
-                            keyboard.add(InlineKeyboardButton(f"جودة {res}", callback_data=f"quality::{message_id}::{res}"))
-                        
-                        rating_keyboard = create_video_action_keyboard(video_id, call.from_user.id)
-                        for row in rating_keyboard.keyboard:
-                            keyboard.keyboard.append(row)
-                        
-                        bot.send_message(call.message.chat.id, "اختر الجودة المطلوبة:", reply_markup=keyboard)
-                        bot.answer_callback_query(call.id)
-                        return
+                    info_text = ""
+                    if video_details:
+                        duration = video_details.get("duration", "N/A")
+                        quality = video_details.get("quality_resolution", "N/A")
+                        file_size_bytes = video_details.get("file_size")
+                        file_size_mb = f"{file_size_bytes / (1024 * 1024):.2f} MB" if file_size_bytes else "N/A"
+                        info_text = f"\n\nمعلومات الفيديو:\n⏱️ المدة: {duration}\n📏 الجودة: {quality}\n💾 الحجم: {file_size_mb}"
+
+                    caption = video[2] or video[4] or "فيديو بدون عنوان"
+                    message_to_send = f"*تفاصيل الفيديو:*\n\n{caption}{info_text}"
+
+                    keyboard = InlineKeyboardMarkup()
+                    keyboard.add(InlineKeyboardButton("عرض الفيديو", callback_data=f"send_video::{video_id}::{message_id}::{chat_id}"))
+                    keyboard.add(InlineKeyboardButton("إلغاء", callback_data="noop"))
+
+                    bot.send_message(call.message.chat.id, message_to_send, reply_markup=keyboard, parse_mode="Markdown")
+                    bot.answer_callback_query(call.id)
                     
+                except Exception as e:
+                    print(f"Error handling video callback: {e}")
+                    bot.answer_callback_query(call.id, "حدث خطأ أثناء إرسال الفيديو.")
+
+            elif action == "send_video":
+                _, video_id, message_id, chat_id = data
+                video_id = int(video_id)
+                
+                try:
                     bot.copy_message(call.message.chat.id, chat_id, int(message_id))
                     rating_keyboard = create_video_action_keyboard(video_id, call.from_user.id)
                     bot.send_message(call.message.chat.id, "قيم هذا الفيديو:", reply_markup=rating_keyboard)
                     bot.answer_callback_query(call.id, "جاري إرسال الفيديو...")
-                    
                 except Exception as e:
-                    print(f"Error handling video callback: {e}")
+                    print(f"Error sending video: {e}")
                     bot.answer_callback_query(call.id, "حدث خطأ أثناء إرسال الفيديو.")
 
             elif action == "rate":
@@ -619,9 +652,8 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                     return
                 videos, total_count = search_videos(query, page=page)
                 keyboard = create_paginated_keyboard(videos, total_count, page, "search_all", "all")
-                bot.edit_message_text(f"نتائج البحث الشامل عن \"{query}\":", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+                bot.edit_message_text(f"نتائج البحث الشامل عن \"{query}\":", call.message.chat.id, call.message.message_id, reply_markup=keyboard, parse_mode="Markdown")
                 bot.answer_callback_query(call.id)
-
             elif action == "search_cat":
                 _, category_id, page_str = data
                 page = int(page_str)
