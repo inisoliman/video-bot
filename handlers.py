@@ -142,7 +142,12 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                 if not check_subscription(message.from_user.id, channel_id):
                     not_subscribed_channels.append((channel_id, channel_name))
             
-
+            if not_subscribed_channels:
+                markup = InlineKeyboardMarkup()
+                for channel_id, channel_name in not_subscribed_channels:
+                   markup.add(InlineKeyboardButton(f"اشترك في {channel_name}", url=f"https://t.me/c/{str(channel_id).replace('-100', '')}"))
+                bot.reply_to(message, "يرجى الاشتراك في القنوات التالية لاستخدام البوت:", reply_markup=markup)
+                return
 
         bot.reply_to(message, "أهلاً بك في بوت البحث عن الفيديوهات!", reply_markup=main_menu())
 
