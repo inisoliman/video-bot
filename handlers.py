@@ -437,7 +437,7 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                     popular = get_popular_videos()
                     
                     stats_text = f"📊 *إحصائيات المحتوى*\n\n"
-                    stats_text += f"- إجمالي الفيديوهات: *{stats['video_count']}*\n"  # السطر 440 - تأكد من ترميز الملف UTF-8
+                    stats_text += f"- إجمالي الفيديوهات: *{stats['video_count']}*\n"  # السطر 440
                     stats_text += f"- إجمالي التصنيفات: *{stats['category_count']}*\n"
                     stats_text += f"- إجمالي المشاهدات: *{stats['total_views']}*\n"
                     stats_text += f"- إجمالي التقييمات: *{stats['total_ratings']}*\n\n"
@@ -462,7 +462,7 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                         bot.answer_callback_query(call.id, "لا توجد تصنيفات حالياً. قم بإنشاء واحد أولاً.")
                         return
                     keyboard = InlineKeyboardMarkup(row_width=2)
-                    buttons = [InlineKeyboardButton(text=cat[1], callback_data=f"admin::setcat::{cat Fax: cat[0]}") for cat in categories]
+                    buttons = [InlineKeyboardButton(text=cat[1], callback_data=f"admin::setcat::{cat[0]}") for cat in categories]
                     keyboard.add(*buttons)
                     bot.edit_message_text("اختر التصنيف الذي تريد تفعيله:", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
 
@@ -603,7 +603,7 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                     if category:
                         bot.edit_message_text(f"التصنيفات الفرعية في \"{category[1]}\"", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
                     else:
-                        bot.edit_message_text("ال تصنيف غير موجود.", call.message.chat.id, call.message.message_id)
+                        bot.edit_message_text("التصنيف غير موجود.", call.message.chat.id, call.message.message_id)
                 else:
                     videos, total_count = get_videos(category_id, page)
                     if videos:
