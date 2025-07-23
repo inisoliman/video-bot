@@ -145,7 +145,7 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
             if not_subscribed_channels:
                 markup = InlineKeyboardMarkup()
                 for channel_id, channel_name in not_subscribed_channels:
-                   markup.add(InlineKeyboardButton(f"اشترك في {channel_name}", url=f"https://t.me/c/{str(channel_id).replace('-100', '')}"))
+                    markup.add(InlineKeyboardButton(f"اشترك في {channel_name}", url=f"https://t.me/c/{str(channel_id).replace('-100', '')}"))
                 bot.reply_to(message, "يرجى الاشتراك في القنوات التالية لاستخدام البوت:", reply_markup=markup)
                 return
 
@@ -387,7 +387,7 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                     downloaded_file = bot.download_file(file_info.file_path)
                     
                     # حفظ الملف مؤقتاً
-                    temp_file_path = f"/tmp/{file_info.file_path.split("/")[-1]}"
+                    temp_file_path = f"/tmp/{file_info.file_path.split('/')[-1]}"
                     with open(temp_file_path, "wb") as f:
                         f.write(downloaded_file)
                     
@@ -437,18 +437,18 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                     popular = get_popular_videos()
                     
                     stats_text = f"📊 *إحصائيات المحتوى*\n\n"
-                    stats_text += f"- إجمالي الفيديوهات: *{stats[\"video_count\"]}*\n"
-                    stats_text += f"- إجمالي التصنيفات: *{stats[\"category_count\"]}*\n"
-                    stats_text += f"- إجمالي المشاهدات: *{stats[\"total_views\"]}*\n"
-                    stats_text += f"- إجمالي التقييمات: *{stats[\"total_ratings\"]}*\n\n"
+                    stats_text += f"- إجمالي الفيديوهات: *{stats['video_count']}*\n"  # السطر 440 - تأكد من ترميز الملف UTF-8
+                    stats_text += f"- إجمالي التصنيفات: *{stats['category_count']}*\n"
+                    stats_text += f"- إجمالي المشاهدات: *{stats['total_views']}*\n"
+                    stats_text += f"- إجمالي التقييمات: *{stats['total_ratings']}*\n\n"
                     
-                    if popular[\"most_viewed\"]:
-                        most_viewed = popular[\"most_viewed\"][0]
-                        stats_text += f"🔥 الأكثر مشاهدة: {most_viewed[2] or most_viewed[4] or \"فيديو\"} ({most_viewed[7]} مشاهدة)\n"
+                    if popular["most_viewed"]:
+                        most_viewed = popular["most_viewed"][0]
+                        stats_text += f"🔥 الأكثر مشاهدة: {most_viewed[2] or most_viewed[4] or 'فيديو'} ({most_viewed[7]} مشاهدة)\n"
                     
-                    if popular[\"highest_rated\"]:
-                        highest_rated = popular[\"highest_rated\"][0]
-                        stats_text += f"⭐ الأعلى تقييماً: {highest_rated[2] or highest_rated[4] or \"فيديو\"} ({highest_rated[8]:.1f}/5)\n"
+                    if popular["highest_rated"]:
+                        highest_rated = popular["highest_rated"][0]
+                        stats_text += f"⭐ الأعلى تقييماً: {highest_rated[2] or highest_rated[4] or 'فيديو'} ({highest_rated[8]:.1f}/5)\n"
                     
                     bot.send_message(call.message.chat.id, stats_text, parse_mode="Markdown")
                 
@@ -462,7 +462,7 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                         bot.answer_callback_query(call.id, "لا توجد تصنيفات حالياً. قم بإنشاء واحد أولاً.")
                         return
                     keyboard = InlineKeyboardMarkup(row_width=2)
-                    buttons = [InlineKeyboardButton(text=cat[1], callback_data=f"admin::setcat::{cat[0]}") for cat in categories]
+                    buttons = [InlineKeyboardButton(text=cat[1], callback_data=f"admin::setcat::{cat Fax: cat[0]}") for cat in categories]
                     keyboard.add(*buttons)
                     bot.edit_message_text("اختر التصنيف الذي تريد تفعيله:", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
 
@@ -603,13 +603,13 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                     if category:
                         bot.edit_message_text(f"التصنيفات الفرعية في \"{category[1]}\"", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
                     else:
-                        bot.edit_message_text("التصنيف غير موجود.", call.message.chat.id, call.message.message_id)
+                        bot.edit_message_text("ال تصنيف غير موجود.", call.message.chat.id, call.message.message_id)
                 else:
                     videos, total_count = get_videos(category_id, page)
                     if videos:
                         keyboard = create_paginated_keyboard(videos, total_count, page, "cat", category_id)
                         category = get_category_by_id(category_id)
-                        bot.edit_message_text(f"الفيديوهات في فئة \"{category[1] if category else \"غير معروف\"}\"", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+                        bot.edit_message_text(f"الفيديوهات في فئة \"{category[1] if category else 'غير معروف'}\"", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
                     else:
                         bot.edit_message_text("لا توجد فيديوهات في هذا التصنيف.", call.message.chat.id, call.message.message_id)
                 
@@ -637,11 +637,11 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                     videos, total_count = search_videos(query, page=page, category_id=category_id)
                     if not videos:
                         category = get_category_by_id(category_id)
-                        bot.edit_message_text(f"لم يتم العثور على نتائج للبحث عن \"{query}\" في فئة \"{category[1] if category else \"غير معروف\"}\"", call.message.chat.id, call.message.message_id)
+                        bot.edit_message_text(f"لم يتم العثور على نتائج للبحث عن \"{query}\" في فئة \"{category[1] if category else 'غير معروف'}\"", call.message.chat.id, call.message.message_id)
                         return
                     keyboard = create_paginated_keyboard(videos, total_count, page, "search_cat", category_id)
                     category = get_category_by_id(category_id)
-                    bot.edit_message_text(f"نتائج البحث عن \"{query}\" في فئة \"{category[1] if category else \"غير معروف\"}\"", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+                    bot.edit_message_text(f"نتائج البحث عن \"{query}\" في فئة \"{category[1] if category else 'غير معروف'}\"", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
 
             elif action == "search_all":
                 _, context, page_str = data
@@ -665,7 +665,7 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                 videos, total_count = search_videos(query, page=page, category_id=category_id)
                 keyboard = create_paginated_keyboard(videos, total_count, page, "search_cat", category_id)
                 category = get_category_by_id(category_id)
-                bot.edit_message_text(f"نتائج البحث عن \"{query}\" في فئة \"{category[1] if category else \"غير معروف\"}\"", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+                bot.edit_message_text(f"نتائج البحث عن \"{query}\" في فئة \"{category[1] if category else 'غير معروف'}\"", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
                 bot.answer_callback_query(call.id)
             
             elif action == "noop":
@@ -674,6 +674,3 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
         except Exception as e:
             print(f"Callback query error: {e}")
             bot.answer_callback_query(call.id, "حدث خطأ. حاول مرة أخرى.")
-
-
-
