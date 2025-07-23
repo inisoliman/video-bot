@@ -7,6 +7,8 @@ import telebot
 import os
 import time
 import logging
+# استيراد الاستثناء المخصص من المكتبة لمعالجة أخطاء API بشكل أفضل
+from telebot.apihelper import ApiTelegramException
 
 # استيراد الوظائف الجديدة من db_manager
 from db_manager import verify_and_repair_schema
@@ -60,11 +62,22 @@ if __name__ == "__main__":
     
     logger.info("✅ Bot has started successfully and is now polling for updates.")
     
-    # 3. حلقة التشغيل مع إعادة المحاولة عند حدوث خطأ
+    # 3. حلقة التشغيل مع معالجة متقدمة للأخطاء
     while True:
         try:
             bot.polling(non_stop=True)
+        except ApiTelegramException as e:
+            logger.error(f"Telegram API Error caught: {e.description}")
+            # معالجة خاصة لخطأ 409 الذي يعني وجود نسخة أخرى من البوت تعمل
+            if e.error_code == 409:
+                logger.warning("Conflict error (409): Another instance of the bot is likely running.")
+                logger.warning("The script will wait for 1 minute before retrying, to allow the other instance to terminate.")
+                logger.warning("Please check your hosting platform (e.g., Railway) to ensure only one instance is active.")
+                time.sleep(60)
+            else:
+                logger.info("A non-conflict API error occurred. Retrying in 30 seconds...")
+                time.sleep(30)
         except Exception as e:
-            logger.error(f"An error occurred in the main polling loop: {e}", exc_info=True)
+            logger.error(f"An unexpected error occurred in the main polling loop: {e}", exc_info=True)
             logger.info("Restarting in 15 seconds...")
             time.sleep(15)
