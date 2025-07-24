@@ -1,5 +1,9 @@
 import re
 from pymediainfo import MediaInfo
+import logging
+
+# إعداد المسجل (logger) لهذا الملف
+logger = logging.getLogger(__name__)
 
 def extract_video_metadata(caption):
     """استخلاص البيانات الوصفية من كابشن الفيديو."""
@@ -9,9 +13,9 @@ def extract_video_metadata(caption):
 
     # استخلاص الجودات
     quality_patterns = {
-        "1080p": [r"1080[pP]", r"FHD", r"Full\\s*HD"],
-        "720p": [r"720[pP]", r"\\bHD\\b"],
-        "480p": [r"480[pP]", r"\\bSD\\b"]
+        "1080p": [r"1080[pP]", r"FHD", r"Full\s*HD"],
+        "720p": [r"720[pP]", r"\bHD\b"],
+        "480p": [r"480[pP]", r"\bSD\b"]
     }
     
     found_qualities = set()
@@ -38,7 +42,8 @@ def get_video_info(file_path):
         media_info = MediaInfo.parse(file_path)
         video_track = None
         for track in media_info.tracks:
-            if track.track_type == \'Video\':
+            # --- هذا هو السطر الذي تم تصحيحه ---
+            if track.track_type == 'Video':
                 video_track = track
                 break
         
@@ -65,7 +70,5 @@ def get_video_info(file_path):
             }
         return None
     except Exception as e:
-        print(f"Error extracting video info: {e}")
+        logger.error(f"Error extracting video info from '{file_path}': {e}", exc_info=True)
         return None
-
-
