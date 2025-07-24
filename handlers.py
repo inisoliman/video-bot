@@ -7,9 +7,12 @@ import json
 from urllib.parse import urlparse
 import math
 from datetime import datetime
+import logging
+
+# إعداد المسجل (logger) لهذا الملف
+logger = logging.getLogger(__name__)
 
 # --- جملة الاستيراد المصححة ---
-# تم إزالة init_db, migrate_old_data, و DB_CONFIG لأنها لم تعد مطلوبة هنا
 from db_manager import (
     add_category, get_categories_tree, get_child_categories,
     get_category_by_id, add_video, get_videos, increment_video_view_count,
@@ -50,19 +53,19 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
             buttons.append(InlineKeyboardButton(cat['name'], callback_data=f"cat::{cat['id']}::0"))
         keyboard.add(*buttons)
         if parent_id:
-            # نفترض أن get_category_by_id يرجع أيضاً قاموساً
             parent_category = get_category_by_id(parent_id)
-            if parent_category and parent_category['parent_id'] is not None:
+            if parent_category and parent_category.get('parent_id') is not None:
                  keyboard.add(InlineKeyboardButton("🔙 رجوع", callback_data=f"cat::{parent_category['parent_id']}::0"))
             else:
-                 keyboard.add(InlineKeyboardButton("🔙 رجوع للقائمة الرئيسية", callback_data="back_to_cats"))
-
+                 keyboard.add(InlineKeyboardButton("🔙 رجوع للتصنيفات الرئيسية", callback_data="back_to_cats"))
         return keyboard
 
     def create_paginated_keyboard(videos, total_count, current_page, action_prefix, context_id):
         keyboard = InlineKeyboardMarkup(row_width=1)
         for video in videos:
-            video_info = json.loads(video['metadata']) if video['metadata'] else {}
+            # --- هذا هو السطر الذي تم تصحيحه ---
+            # حقل 'metadata' هو بالفعل قاموس (dict) بسبب نوع JSONB و DictCursor
+            video_info = video['metadata'] if video['metadata'] else {}
             
             title = video['caption'].split('\n')[0] if video['caption'] else f"فيديو {video['id']}"
             
@@ -75,9 +78,13 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                 elif quality:
                     info_text = f" ({quality})"
                 elif duration:
-                    info_text = f" ({duration})"
-            
-            rating_text = f" ⭐ {video['avg_rating']:.1f}/5" if video['avg_rating'] else ""
+                    # تحويل مدة الفيديو من ثواني إلى تنسيق H:MM:SS
+                    secs = int(duration)
+                    mins = secs // 60
+                    hours = mins // 60
+                    info_text = f" ({hours:02}:{mins%60:02}:{secs%60:02})" if hours > 0 else f" ({mins:02}:{secs%60:02})"
+
+            rating_text = f" ⭐ {video['avg_rating']:.1f}/5" if video['avg_rating'] and video['avg_rating'] > 0 else ""
             views_text = f" 👁️ {video['view_count']}"
 
             keyboard.add(InlineKeyboardButton(
@@ -132,7 +139,7 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
             return member.status in ['member', 'administrator', 'creator']
         except telebot.apihelper.ApiTelegramException as e:
             if e.result_json['description'] == 'Bad Request: chat not found':
-                print(f"Channel {channel_id} not found. Please remove it from required channels.")
+                logger.warning(f"Channel {channel_id} not found. Please remove it from required channels.")
                 return True # Treat as subscribed if channel not found to avoid blocking users
             return False
 
@@ -261,7 +268,7 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                 sent_count += 1
             except Exception as e:
                 failed_count += 1
-                print(f"Failed to send to {user_id}: {e}")
+                logger.warning(f"Failed to send broadcast to {user_id}: {e}")
             time.sleep(0.1) # لتجنب تجاوز حدود تليجرام
             
         bot.send_message(message.chat.id, f"✅ اكتمل البث!\n\n- رسائل ناجحة: {sent_count}\n- رسائل فاشلة: {failed_count}")
@@ -373,7 +380,7 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
         if str(message.chat.id) == CHANNEL_ID:
             active_category_id = get_active_category_id()
             if not active_category_id:
-                print("Warning: No active category set. Video will not be saved.")
+                logger.warning("No active category set. Video will not be saved.")
                 return
 
             file_id = message.video.file_id if message.video else None
@@ -381,7 +388,6 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
             video_info_data = None
             if message.video and file_id:
                 try:
-                    file_info = bot.get_file(file_id)
                     # لا نحتاج لتحميل الملف، فقط نستخلص المعلومات المتوفرة
                     video_info_data = {
                         "duration": message.video.duration,
@@ -391,9 +397,9 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                         "quality_resolution": f"{message.video.height}p" if message.video.height else "N/A"
                     }
                 except Exception as e:
-                    print(f"Error getting video file info: {e}")
+                    logger.error(f"Error getting video file info: {e}", exc_info=True)
 
-            print(f"New video detected. Assigning to active category ID: {active_category_id}. Message ID: {message.message_id}")
+            logger.info(f"New video detected. Assigning to active category ID: {active_category_id}. Message ID: {message.message_id}")
             success = add_video(
                 message_id=message.message_id,
                 caption=message.caption,
@@ -404,9 +410,9 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                 video_info=video_info_data
             )
             if success:
-                print("Video added successfully.")
+                logger.info("Video added successfully.")
             else:
-                print("Failed to add video.")
+                logger.error("Failed to add video.")
 
     # --- معالج ضغطات الأزرار المحسن ---
 
@@ -529,8 +535,8 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                     bot.answer_callback_query(call.id, "جاري إرسال الفيديو...")
                     
                 except Exception as e:
-                    print(f"Error handling video callback: {e}")
-                    bot.answer_callback_query(call.id, "حدث خطأ أثناء إرسال الفيديو. قد يكون قد تم حذفه من القناة.")
+                    logger.error(f"Error handling video callback: {e}", exc_info=True)
+                    bot.answer_callback_query(call.id, "حدث خطأ أثناء إرسال الفيديو. قد يكون قد تم حذفه من القناة.", show_alert=True)
 
             elif action == "rate":
                 _, video_id, rating = data
@@ -624,5 +630,8 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                 bot.answer_callback_query(call.id)
 
         except Exception as e:
-            print(f"Callback query error: {e}")
-            bot.answer_callback_query(call.id, "حدث خطأ. حاول مرة أخرى.")
+            logger.error(f"Callback query error: {e}", exc_info=True)
+            try:
+                bot.answer_callback_query(call.id, "حدث خطأ. حاول مرة أخرى.", show_alert=True)
+            except Exception as e_inner:
+                logger.error(f"Could not even answer callback query: {e_inner}")
