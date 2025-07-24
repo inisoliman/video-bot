@@ -181,8 +181,6 @@ def verify_and_repair_schema():
             conn.close()
 
 # --- وظائف إدارة البيانات (مع معالجة أخطاء محسنة) ---
-# ملاحظة: تم تبسيط الكود هنا للاختصار، لكن المنطق هو نفسه
-# تمت إضافة try-except-finally و logging لكل دالة
 
 def execute_query(query, params=None, fetch=None):
     """دالة مركزية لتنفيذ الاستعلامات بأمان."""
@@ -334,7 +332,7 @@ def add_video_rating(video_id, user_id, rating):
     return True
 
 def get_video_rating_stats(video_id):
-    query = "SELECT AVG(rating), COUNT(id) FROM video_ratings WHERE video_id = %s"
+    query = "SELECT AVG(rating) as avg, COUNT(id) as count FROM video_ratings WHERE video_id = %s"
     return execute_query(query, (video_id,), fetch="one")
 
 def get_user_video_rating(video_id, user_id):
@@ -342,6 +340,10 @@ def get_user_video_rating(video_id, user_id):
     return result[0] if result else None
 
 def get_popular_videos():
+    """
+    دالة محسنة لجلب الفيديوهات الشائعة مع شروط منطقية أكثر.
+    """
+    # جلب الفيديوهات التي تمت مشاهدتها مرة واحدة على الأقل
     most_viewed_query = """
         SELECT v.*, COALESCE(r.avg_rating, 0) as avg_rating, COALESCE(r.total_ratings, 0) as total_ratings
         FROM video_archive v
@@ -349,8 +351,11 @@ def get_popular_videos():
             SELECT video_id, AVG(rating) as avg_rating, COUNT(id) as total_ratings
             FROM video_ratings GROUP BY video_id
         ) r ON v.id = r.video_id
-        ORDER BY v.view_count DESC, v.id DESC LIMIT 10
+        WHERE v.view_count > 0
+        ORDER BY v.view_count DESC NULLS LAST, v.id DESC LIMIT 10
     """
+    
+    # جلب الفيديوهات التي تم تقييمها مرة واحدة على الأقل
     highest_rated_query = """
         SELECT v.*, r.avg_rating, r.total_ratings
         FROM video_archive v
@@ -358,7 +363,7 @@ def get_popular_videos():
             SELECT video_id, AVG(rating) as avg_rating, COUNT(id) as total_ratings
             FROM video_ratings GROUP BY video_id
         ) r ON v.id = r.video_id
-        WHERE r.total_ratings > 2 -- يمكن تعديل هذا الرقم لاحقاً
+        WHERE r.total_ratings >= 1
         ORDER BY r.avg_rating DESC, r.total_ratings DESC, v.id DESC LIMIT 10
     """
     return {
