@@ -197,12 +197,16 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
     def admin_panel(message):
         bot.send_message(message.chat.id, "أهلاً بك في لوحة تحكم الآدمن.", reply_markup=generate_admin_panel())
 
-    @bot.message_handler(commands=["updatemetadata"])
-    @check_admin
-    def update_metadata_command(message):
+    # --- إصلاح صلاحيات الأدمن: دالة داخلية بدون مصادقة ---
+    def _run_update_metadata(message):
         bot.send_message(message.chat.id, "⏳ جاري تحديث بيانات الفيديوهات القديمة...")
         updated_count = migrate_old_videos_metadata()
         bot.send_message(message.chat.id, f"✅ اكتمل! تم تحديث {updated_count} فيديو.")
+
+    @bot.message_handler(commands=["updatemetadata"])
+    @check_admin
+    def update_metadata_command(message):
+        _run_update_metadata(message)
 
     def admin_broadcast_step(message):
         if message.text == '/cancel':
@@ -239,10 +243,14 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
             action = parts[0]
 
             if action == "admin":
+                if call.from_user.id not in ADMIN_IDS:
+                    bot.answer_callback_query(call.id, "ليس لديك صلاحية الوصول.", show_alert=True)
+                    return
+                
                 sub_action = parts[1]
                 bot.answer_callback_query(call.id)
                 if sub_action == "updatemeta":
-                    update_metadata_command(call.message)
+                    _run_update_metadata(call.message)
                 elif sub_action == "broadcast":
                     msg = bot.send_message(call.message.chat.id, "أرسل الرسالة التي تريد بثها (أو /cancel للإلغاء).")
                     bot.register_next_step_handler(msg, admin_broadcast_step)
@@ -250,7 +258,7 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                     bot.send_message(call.message.chat.id, f"👤 عدد المشتركين: {get_subscriber_count()}")
                 elif sub_action == "stats":
                     stats = get_bot_stats()
-                    text = (f"� *الإحصائيات:*\n"
+                    text = (f"📊 *الإحصائيات:*\n"
                             f"- الفيديوهات: *{stats['video_count']}*\n"
                             f"- التصنيفات: *{stats['category_count']}*\n"
                             f"- المشاهدات: *{stats['total_views']}*\n"
@@ -334,12 +342,19 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                     list_videos(call.message, edit_message=call.message, parent_id=category_id)
                 else:
                     videos, total = get_videos(category_id=category_id, page=page)
+                    category = get_category_by_id(category_id) if category_id else None
+                    cat_name = category['name'] if category else "التصنيفات الرئيسية"
+                    
                     if videos:
                         keyboard = create_paginated_keyboard(videos, total, page, "cat", category_id or "")
-                        cat_name = get_category_by_id(category_id)['name'] if category_id else "التصنيفات الرئيسية"
                         bot.edit_message_text(f"الفيديوهات في '{cat_name}':", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
                     else:
-                        bot.edit_message_text("لا توجد فيديوهات في هذا التصنيف.", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+                        keyboard = InlineKeyboardMarkup()
+                        parent_id_of_empty_cat = ""
+                        if category:
+                            parent_id_of_empty_cat = category.get('parent_id') or ""
+                        keyboard.add(InlineKeyboardButton("🔙 رجوع", callback_data=f"cat::{parent_id_of_empty_cat}::0"))
+                        bot.edit_message_text(f"لا توجد فيديوهات في تصنيف '{cat_name}'.", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
                 bot.answer_callback_query(call.id)
 
             elif action == "search_all":
