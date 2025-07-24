@@ -1,71 +1,78 @@
 import re
-from pymediainfo import MediaInfo
 import logging
+from pymediainfo import MediaInfo
+import os
 
-# إعداد المسجل (logger) لهذا الملف
 logger = logging.getLogger(__name__)
 
-def extract_video_metadata(caption):
-    """استخلاص البيانات الوصفية من كابشن الفيديو."""
-    metadata = {"qualities": [], "is_translated": False, "is_dubbed": False}
+def generate_title_and_key(caption):
+    """
+    Generates a clean title and a grouping key from a video caption.
+    """
     if not caption:
-        return metadata
+        # استخدم مفتاحاً فريداً للفيديوهات بدون كابشن لتجنب تجميعها معاً
+        return "فيديو بدون عنوان", f"no_caption_{os.urandom(4).hex()}"
 
-    # استخلاص الجودات
-    quality_patterns = {
-        "1080p": [r"1080[pP]", r"FHD", r"Full\s*HD"],
-        "720p": [r"720[pP]", r"\bHD\b"],
-        "480p": [r"480[pP]", r"\bSD\b"]
-    }
+    # 1. إنشاء العنوان عن طريق إزالة وسوم الجودة فقط
+    title = caption
+    quality_tags_for_title = [
+        r'\b\d{3,4}p\b', r'\b(fhd|hd|sd)\b', r'full\s*hd'
+    ]
+    for tag in quality_tags_for_title:
+        title = re.sub(tag, '', title, flags=re.IGNORECASE)
     
-    found_qualities = set()
-    for res, patterns in quality_patterns.items():
-        for pattern in patterns:
-            if re.search(pattern, caption, re.IGNORECASE):
-                found_qualities.add(res)
+    # تنظيف الفواصل الإضافية التي قد تتبقى
+    title = re.sub(r'\|\s*\|', '|', title) # "||" to "|"
+    title = title.strip(' |-_')
+    title = ' '.join(title.split())
+
+    # 2. إنشاء مفتاح التجميع عن طريق تنظيف أكثر قوة
+    key = title.lower()
     
-    # إضافة الجودات المكتشفة
-    for quality in found_qualities:
-        metadata["qualities"].append({"resolution": quality, "message_id": None})
+    # إزالة الكلمات الوصفية التي لا تحدد هوية الفيلم
+    extra_words = [
+        r'مترجم', r'مدبلج', r'حصريا', r'حصري', r'نسخة', r'أصلية', r'جودة عالية'
+    ]
+    for word in extra_words:
+        key = re.sub(word, '', key, flags=re.IGNORECASE)
 
-    # استخلاص حالة الترجمة/الدبلجة
-    if re.search(r"مترجم|sub|subbed|subtitle", caption, re.IGNORECASE):
-        metadata["is_translated"] = True
-    if re.search(r"مدبلج|dub|dubbed|arabic", caption, re.IGNORECASE):
-        metadata["is_dubbed"] = True
+    # توحيد الأحرف (مثل: أ، إ، آ -> ا)
+    key = re.sub(r'[أإآ]', 'ا', key)
+    key = re.sub(r'ة', 'ه', key)
+    
+    # إزالة جميع الأحرف غير الأبجدية الرقمية (ما عدا المسافات)
+    key = re.sub(r'[^\w\s]', '', key)
+    key = ' '.join(key.split())
 
-    return metadata
+    if not key:
+        # حل بديل إذا كان الكابشن يحتوي فقط على كلمات مفتاحية تم حذفها
+        return title, f"empty_key_{os.urandom(4).hex()}"
+
+    return title, key
 
 def get_video_info(file_path):
-    """استخلاص معلومات الفيديو باستخدام MediaInfo."""
+    """
+    Extracts video information using MediaInfo.
+    """
     try:
         media_info = MediaInfo.parse(file_path)
-        video_track = None
-        for track in media_info.tracks:
-            # --- هذا هو السطر الذي تم تصحيحه ---
-            if track.track_type == 'Video':
-                video_track = track
-                break
+        video_track = next((t for t in media_info.tracks if t.track_type == 'Video'), None)
         
         if video_track:
-            duration_ms = video_track.duration # in milliseconds
+            duration_ms = video_track.duration
             duration_seconds = duration_ms / 1000 if duration_ms else 0
             
-            # تنسيق المدة إلى H:MM:SS
-            hours = int(duration_seconds // 3600)
-            minutes = int((duration_seconds % 3600) // 60)
-            seconds = int(duration_seconds % 60)
-            formatted_duration = f"{hours:02d}:{minutes:02d}:{seconds:02d}" if hours > 0 else f"{minutes:02d}:{seconds:02d}"
+            hours, remainder = divmod(duration_seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            formatted_duration = f"{int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}" if hours > 0 else f"{int(minutes):02d}:{int(seconds):02d}"
 
             return {
                 "duration": formatted_duration,
                 "width": video_track.width,
                 "height": video_track.height,
-                "file_size": video_track.file_size, # in bytes
+                "file_size": video_track.file_size,
                 "codec": video_track.codec,
                 "frame_rate": video_track.frame_rate,
-                "overall_bit_rate": video_track.overall_bit_rate,
-                "display_aspect_ratio": video_track.display_aspect_ratio,
                 "quality_resolution": f"{video_track.height}p" if video_track.height else "N/A"
             }
         return None
