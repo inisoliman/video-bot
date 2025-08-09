@@ -96,6 +96,70 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
         keyboard.add(InlineKeyboardButton("🔙 رجوع للتصنيفات", callback_data="back_to_cats"))
         return keyboard
 
+    # --- دالة جديدة لعرض التصنيفات والفيديوهات معاً ---
+    def create_combined_keyboard(child_categories, videos, total_video_count, current_page, parent_category_id):
+        keyboard = InlineKeyboardMarkup()
+
+        # 1. إضافة التصنيفات الفرعية أولاً
+        if child_categories:
+            keyboard.add(InlineKeyboardButton("📂--- التصنيفات الفرعية ---📂", callback_data="noop"), row_width=1)
+            cat_buttons = [InlineKeyboardButton(f"📁 {cat['name']}", callback_data=f"cat::{cat['id']}::0") for cat in child_categories]
+            # إضافة الأزرار في صفوف من اثنين
+            for i in range(0, len(cat_buttons), 2):
+                if i + 1 < len(cat_buttons):
+                    keyboard.add(cat_buttons[i], cat_buttons[i+1], row_width=2)
+                else:
+                    keyboard.add(cat_buttons[i], row_width=1)
+        
+        # 2. إضافة الفيديوهات
+        if videos:
+            if child_categories: # إضافة فاصل فقط إذا كانت هناك تصنيفات فرعية
+                keyboard.add(InlineKeyboardButton("🎬--- الفيديوهات ---🎬", callback_data="noop"), row_width=1)
+
+            for video in videos:
+                video_info = video['metadata'] if video['metadata'] else {}
+                title = video['caption'].split('\n')[0] if video['caption'] else f"فيديو {video['id']}"
+                info_text = ""
+                if video_info:
+                    duration = video_info.get("duration")
+                    quality = video_info.get("quality_resolution")
+                    if quality and duration:
+                        info_text = f" ({quality} | {duration})"
+                    elif quality:
+                        info_text = f" ({quality})"
+                    elif duration:
+                        secs = int(duration)
+                        mins = secs // 60
+                        hours = mins // 60
+                        info_text = f" ({hours:02}:{mins%60:02}:{secs%60:02})" if hours > 0 else f" ({mins:02}:{secs%60:02})"
+                rating_text = f" ⭐ {video['avg_rating']:.1f}/5" if video['avg_rating'] and video['avg_rating'] > 0 else ""
+                views_text = f" 👁️ {video['view_count']}"
+                keyboard.add(InlineKeyboardButton(
+                    f"{title}{info_text}{rating_text}{views_text}",
+                    callback_data=f"video::{video['id']}::{video['message_id']}::{video['chat_id']}"
+                ), row_width=1)
+        
+        # 3. إضافة أزرار التنقل للفيديوهات
+        nav_buttons = []
+        if current_page > 0:
+            nav_buttons.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"cat::{parent_category_id}::{current_page - 1}"))
+        
+        total_pages = math.ceil(total_video_count / VIDEOS_PER_PAGE) - 1
+        if current_page < total_pages:
+            nav_buttons.append(InlineKeyboardButton("التالي ➡️", callback_data=f"cat::{parent_category_id}::{current_page + 1}"))
+        
+        if nav_buttons:
+            keyboard.add(*nav_buttons, row_width=2)
+        
+        # 4. إضافة زر الرجوع
+        parent_category = get_category_by_id(parent_category_id)
+        if parent_category and parent_category.get('parent_id') is not None:
+             keyboard.add(InlineKeyboardButton("🔙 رجوع", callback_data=f"cat::{parent_category['parent_id']}::0"), row_width=1)
+        else:
+             keyboard.add(InlineKeyboardButton("🔙 رجوع للتصنيفات الرئيسية", callback_data="back_to_cats"), row_width=1)
+
+        return keyboard
+
     def create_video_action_keyboard(video_id, user_id):
         keyboard = InlineKeyboardMarkup(row_width=5)
         user_rating = get_user_video_rating(video_id, user_id)
@@ -606,21 +670,30 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                 else:
                     bot.answer_callback_query(call.id, "حدث خطأ في التقييم.")
 
+            # --- معالج عرض التصنيفات (النسخة المعدلة) ---
             elif action == "cat":
                 _, category_id_str, page_str = data
                 category_id, page = int(category_id_str), int(page_str)
+                
+                # جلب التصنيفات الفرعية والفيديوهات دائماً
                 child_categories = get_child_categories(category_id)
+                videos, total_count = get_videos(category_id, page)
                 category = get_category_by_id(category_id)
-                if child_categories:
-                    keyboard = create_categories_keyboard(category_id)
-                    bot.edit_message_text(f"التصنيفات الفرعية في \"{category['name']}\"", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+
+                if not child_categories and not videos:
+                    bot.edit_message_text(f"التصنيف \"{category['name']}\" فارغ حالياً.", call.message.chat.id, call.message.message_id,
+                        reply_markup=create_combined_keyboard([], [], 0, 0, category_id)) # إظهار زر الرجوع
                 else:
-                    videos, total_count = get_videos(category_id, page)
-                    if videos:
-                        keyboard = create_paginated_keyboard(videos, total_count, page, "cat", category_id)
-                        bot.edit_message_text(f"الفيديوهات في \"{category['name']}\"", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
-                    else:
-                        bot.edit_message_text("لا توجد فيديوهات في هذا التصنيف.", call.message.chat.id, call.message.message_id)
+                    # استخدام الدالة الجديدة لعرض المحتوى المدمج
+                    keyboard = create_combined_keyboard(
+                        child_categories=child_categories,
+                        videos=videos,
+                        total_video_count=total_count,
+                        current_page=page,
+                        parent_category_id=category_id
+                    )
+                    bot.edit_message_text(f"محتويات تصنيف \"{category['name']}\":", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+
                 bot.answer_callback_query(call.id)
 
             elif action.startswith("search_"):
