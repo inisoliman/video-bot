@@ -204,10 +204,12 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                 if not check_subscription(message.from_user.id, channel['channel_id']):
                     not_subscribed_channels.append(channel)
             if not_subscribed_channels:
-                markup = InlineKeyboardMarkup()
+                markup = InlineKeyboardMarkup(row_width=1)
                 for channel in not_subscribed_channels:
                     channel_link_id = str(channel['channel_id']).replace("-100", "")
                     markup.add(InlineKeyboardButton(f"اشترك في {channel['channel_name']}", url=f"https://t.me/c/{channel_link_id}"))
+                # إضافة زر التحقق
+                markup.add(InlineKeyboardButton("✅ لقد اشتركت، تحقق الآن", callback_data="check_subscription"))
                 bot.reply_to(message, "يرجى الاشتراك في القنوات التالية لاستخدام البوت:", reply_markup=markup)
                 return
         bot.reply_to(message, "أهلاً بك في بوت البحث عن الفيديوهات!", reply_markup=main_menu())
@@ -633,6 +635,25 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                     bot.send_message(call.message.chat.id, help_text)
 
             # --- قسم المستخدمين (تصفح، بحث، تقييم) ---
+            elif action == "check_subscription":
+                # إعادة التحقق من الاشتراك
+                required_channels = get_required_channels()
+                not_subscribed_channels = []
+                if required_channels:
+                    for channel in required_channels:
+                        if not check_subscription(call.from_user.id, channel['channel_id']):
+                            not_subscribed_channels.append(channel)
+                
+                if not_subscribed_channels:
+                    # المستخدم لم يشترك بعد
+                    bot.answer_callback_query(call.id, "❌ لم تشترك في جميع القنوات بعد. يرجى المحاولة مرة أخرى.", show_alert=True)
+                else:
+                    # المستخدم اشترك بنجاح
+                    bot.answer_callback_query(call.id, "✅ شكراً لاشتراكك!")
+                    # حذف رسالة الاشتراك وإظهار القائمة الرئيسية
+                    bot.delete_message(call.message.chat.id, call.message.message_id)
+                    bot.send_message(call.message.chat.id, "أهلاً بك في بوت البحث عن الفيديوهات!", reply_markup=main_menu())
+
             elif action == "popular":
                 sub_action = data[1]
                 popular = get_popular_videos()
