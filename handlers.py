@@ -12,7 +12,7 @@ import logging
 # إعداد المسجل (logger) لهذا الملف
 logger = logging.getLogger(__name__)
 
-# --- جملة الاستيراد المصححة ---
+# --- جملة الاستيراد المصححة مع إضافة الدوال الجديدة ---
 from db_manager import (
     add_category, get_categories_tree, get_child_categories,
     get_category_by_id, add_video, get_videos, increment_video_view_count,
@@ -20,7 +20,8 @@ from db_manager import (
     add_video_rating, get_video_rating_stats, get_user_video_rating,
     get_popular_videos, add_bot_user, get_all_user_ids, get_subscriber_count,
     get_bot_stats, search_videos, add_required_channel, remove_required_channel,
-    get_required_channels, admin_steps, user_last_search, VIDEOS_PER_PAGE, CALLBACK_DELIMITER
+    get_required_channels, admin_steps, user_last_search, VIDEOS_PER_PAGE, CALLBACK_DELIMITER,
+    move_video_to_category, delete_video_by_id  # الدوال الجديدة
 )
 from utils import extract_video_metadata, get_video_info
 
@@ -277,11 +278,13 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
         if check_cancel(message): return
         category_name = message.text.strip()
         
-        # يمكن تحسين هذا لاحقًا لدعم التصنيفات الفرعية
-        success, result = add_category(category_name)
+        # استخراج parent_id من الخطوات المحفوظة
+        step_data = admin_steps.pop(message.chat.id, {})
+        parent_id = step_data.get("parent_id")
+
+        success, result = add_category(category_name, parent_id=parent_id)
         if success:
-            set_active_category_id(result)
-            bot.reply_to(message, f"✅ تم إنشاء وتفعيل التصنيف الجديد بنجاح: \"{category_name}\".")
+            bot.reply_to(message, f"✅ تم إنشاء التصنيف الجديد بنجاح: \"{category_name}\".")
         else:
             bot.reply_to(message, f"❌ خطأ في إنشاء التصنيف: {result}")
 
@@ -414,6 +417,72 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
             else:
                 logger.error("Failed to add video.")
 
+    # --- أوامر الآدمن الجديدة (نقل وحذف الفيديوهات) ---
+    @bot.message_handler(commands=['movevideo'])
+    @check_admin
+    def request_video_to_move(message):
+        msg = bot.reply_to(message, "حسناً، الآن قم بإعادة توجيه (Forward) الفيديو الذي تريد نقله إلى هنا. (أو أرسل /cancel)")
+        bot.register_next_step_handler(msg, handle_forwarded_video_to_move)
+
+    def handle_forwarded_video_to_move(message):
+        if check_cancel(message): return
+        
+        # نتأكد أن الرسالة هي إعادة توجيه من قناة
+        if not message.forward_from_chat or not message.forward_from_message_id:
+            msg = bot.reply_to(message, "خطأ. يرجى إعادة توجيه الفيديو من القناة. (أو أرسل /cancel)")
+            bot.register_next_step_handler(msg, handle_forwarded_video_to_move)
+            return
+
+        original_message_id = message.forward_from_message_id
+        video = get_video_by_message_id(original_message_id)
+
+        if not video:
+            bot.reply_to(message, "عذراً، لم أجد هذا الفيديو في قاعدة البيانات.")
+            return
+
+        # الآن نعرض قائمة التصنيفات ليختار الوجهة الجديدة
+        keyboard = create_categories_keyboard()
+        if not keyboard.keyboard:
+            bot.reply_to(message, "لا توجد تصنيفات لنقل الفيديو إليها. قم بإنشاء تصنيف أولاً.")
+            return
+
+        # نعدل callback_data لتناسب عملية النقل
+        for row in keyboard.keyboard:
+            for button in row:
+                parts = button.callback_data.split(CALLBACK_DELIMITER) # cat::{cat_id}::0
+                button.callback_data = f"admin::move_confirm::{video['id']}::{parts[1]}" # admin::move_confirm::{video_id}::{new_cat_id}
+        
+        bot.reply_to(message, f"اختر التصنيف الجديد الذي تريد نقل الفيديو إليه:", reply_markup=keyboard)
+
+    @bot.message_handler(commands=['deletevideo'])
+    @check_admin
+    def request_video_to_delete(message):
+        msg = bot.reply_to(message, "تحذير: هذا الإجراء سيحذف الفيديو من قاعدة بيانات البوت نهائياً.\n\nأعد توجيه الفيديو الذي تريد حذفه. (أو أرسل /cancel)")
+        bot.register_next_step_handler(msg, handle_forwarded_video_to_delete)
+
+    def handle_forwarded_video_to_delete(message):
+        if check_cancel(message): return
+
+        if not message.forward_from_chat or not message.forward_from_message_id:
+            msg = bot.reply_to(message, "خطأ. يرجى إعادة توجيه الفيديو من القناة. (أو أرسل /cancel)")
+            bot.register_next_step_handler(msg, handle_forwarded_video_to_delete)
+            return
+
+        original_message_id = message.forward_from_message_id
+        video = get_video_by_message_id(original_message_id)
+
+        if not video:
+            bot.reply_to(message, "عذراً، لم أجد هذا الفيديو في قاعدة البيانات.")
+            return
+
+        # نطلب تأكيد الحذف
+        keyboard = InlineKeyboardMarkup()
+        caption_preview = (video['caption'] or "فيديو بدون عنوان")[:50]
+        keyboard.add(InlineKeyboardButton("نعم، احذف الفيديو الآن", callback_data=f"admin::delete_confirm::{video['id']}"))
+        keyboard.add(InlineKeyboardButton("لا، إلغاء الأمر", callback_data="admin::cancel_delete"))
+
+        bot.reply_to(message, f"هل أنت متأكد من حذف الفيديو التالي؟\n`{caption_preview}...`", reply_markup=keyboard, parse_mode="Markdown")
+
     # --- معالج ضغطات الأزرار المحسن ---
 
     @bot.callback_query_handler(func=lambda call: True)
@@ -459,7 +528,38 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                     bot.send_message(call.message.chat.id, stats_text, parse_mode="Markdown")
                 
                 elif sub_action == "add_new_cat":
-                    msg = bot.send_message(call.message.chat.id, "أرسل اسم التصنيف الجديد الذي تريد إنشاءه. (أو أرسل /cancel للإلغاء)")
+                    # نسأل الآدمن أولاً عن نوع التصنيف
+                    keyboard = InlineKeyboardMarkup()
+                    keyboard.add(InlineKeyboardButton("تصنيف رئيسي جديد", callback_data="admin::add_cat_main"))
+                    keyboard.add(InlineKeyboardButton("تصنيف فرعي (تحت تصنيف آخر)", callback_data="admin::add_cat_sub_select_parent"))
+                    bot.edit_message_text("اختر نوع التصنيف الذي تريد إضافته:", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+
+                elif sub_action == "add_cat_main":
+                    # إذا اختار "تصنيف رئيسي"، نطلب منه الاسم
+                    admin_steps[call.message.chat.id] = {"parent_id": None}
+                    msg = bot.send_message(call.message.chat.id, "أرسل اسم التصنيف الرئيسي الجديد. (أو /cancel للإلغاء)")
+                    bot.register_next_step_handler(msg, handle_add_new_category)
+
+                elif sub_action == "add_cat_sub_select_parent":
+                    # إذا اختار "تصنيف فرعي"، نعرض له التصنيفات الموجودة ليختار الأب
+                    keyboard = create_categories_keyboard() # نعرض التصنيفات الرئيسية
+                    if not keyboard.keyboard:
+                        bot.answer_callback_query(call.id, "لا توجد تصنيفات رئيسية لإضافة تصنيف فرعي تحتها. أنشئ تصنيفاً رئيسياً أولاً.", show_alert=True)
+                        return
+                    # نغير callback_data لتكون مخصصة لاختيار الأب
+                    for row in keyboard.keyboard:
+                        for button in row:
+                            # From: cat::{cat_id}::0  To: admin::add_cat_sub_set_parent::{cat_id}
+                            parts = button.callback_data.split(CALLBACK_DELIMITER)
+                            button.callback_data = f"admin::add_cat_sub_set_parent::{parts[1]}"
+                    
+                    bot.edit_message_text("اختر التصنيف الرئيسي الذي سيكون الأب للتصنيف الجديد:", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+
+                elif sub_action == "add_cat_sub_set_parent":
+                    # بعد أن يختار الأب، نخزن parent_id ونطلب اسم التصنيف الفرعي
+                    parent_id = int(data[2])
+                    admin_steps[call.message.chat.id] = {"parent_id": parent_id}
+                    msg = bot.send_message(call.message.chat.id, "الآن أرسل اسم التصنيف الفرعي الجديد. (أو /cancel للإلغاء)")
                     bot.register_next_step_handler(msg, handle_add_new_category)
 
                 elif sub_action == "set_active":
@@ -495,6 +595,20 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                     
                 elif sub_action == "list_channels":
                     handle_list_channels(call.message)
+                
+                elif sub_action == "move_confirm":
+                    _, video_id, new_category_id = data
+                    move_video_to_category(int(video_id), int(new_category_id))
+                    category = get_category_by_id(int(new_category_id))
+                    bot.edit_message_text(f"✅ تم نقل الفيديو بنجاح إلى تصنيف \"{category['name']}\".", call.message.chat.id, call.message.message_id)
+                
+                elif sub_action == "delete_confirm":
+                    _, video_id = data
+                    delete_video_by_id(int(video_id))
+                    bot.edit_message_text("✅ تم حذف الفيديو من قاعدة البيانات بنجاح.", call.message.chat.id, call.message.message_id)
+
+                elif sub_action == "cancel_delete":
+                    bot.edit_message_text("👍 تم إلغاء عملية الحذف.", call.message.chat.id, call.message.message_id)
 
             elif action == "popular":
                 sub_action = data[1]
