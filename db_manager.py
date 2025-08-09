@@ -411,7 +411,7 @@ def remove_required_channel(channel_id):
 def get_required_channels():
     return execute_query("SELECT channel_id, channel_name FROM required_channels", fetch="all")
 
-# --- الدوال الجديدة لإدارة الفيديوهات ---
+# --- دوال إدارة الفيديوهات والتصنيفات (الجديدة والمعدلة) ---
 
 def move_video_to_category(video_id, new_category_id):
     """ينقل فيديو إلى تصنيف آخر."""
@@ -423,4 +423,24 @@ def delete_video_by_id(video_id):
     """يحذف فيديو من قاعدة البيانات."""
     query = "DELETE FROM video_archive WHERE id = %s"
     execute_query(query, (video_id,))
+    return True
+
+def delete_category_and_contents(category_id):
+    """يحذف كل الفيديوهات داخل تصنيف معين ثم يحذف التصنيف نفسه."""
+    # أولاً، نحذف الفيديوهات
+    execute_query("DELETE FROM video_archive WHERE category_id = %s", (category_id,))
+    # ثانياً، نحذف التصنيف
+    execute_query("DELETE FROM categories WHERE id = %s", (category_id,))
+    return True
+
+def move_videos_from_category(old_category_id, new_category_id):
+    """ينقل كل الفيديوهات من تصنيف إلى آخر."""
+    query = "UPDATE video_archive SET category_id = %s WHERE category_id = %s"
+    execute_query(query, (new_category_id, old_category_id))
+    return True
+
+def delete_category_by_id(category_id):
+    """يحذف سجل التصنيف فقط (يفترض أن محتوياته قد تم التعامل معها)."""
+    query = "DELETE FROM categories WHERE id = %s"
+    execute_query(query, (category_id,))
     return True
