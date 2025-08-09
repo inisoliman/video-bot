@@ -410,3 +410,17 @@ def remove_required_channel(channel_id):
 
 def get_required_channels():
     return execute_query("SELECT channel_id, channel_name FROM required_channels", fetch="all")
+
+# --- الدوال الجديدة لإدارة الفيديوهات ---
+
+def move_video_to_category(video_id, new_category_id):
+    """ينقل فيديو إلى تصنيف آخر."""
+    query = "UPDATE video_archive SET category_id = %s WHERE id = %s"
+    execute_query(query, (new_category_id, video_id))
+    return True
+
+def delete_video_by_id(video_id):
+    """يحذف فيديو من قاعدة البيانات."""
+    query = "DELETE FROM video_archive WHERE id = %s"
+    execute_query(query, (video_id,))
+    return True
