@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 import math
 from datetime import datetime
 import logging
+import threading
 
 # إعداد المسجل (logger) لهذا الملف
 logger = logging.getLogger(__name__)
@@ -21,10 +22,12 @@ from db_manager import (
     get_popular_videos, add_bot_user, get_all_user_ids, get_subscriber_count,
     get_bot_stats, search_videos, add_required_channel, remove_required_channel,
     get_required_channels, admin_steps, user_last_search, VIDEOS_PER_PAGE, CALLBACK_DELIMITER,
-    move_video_to_category, get_video_by_id, delete_videos_by_ids,  # دوال إدارة الفيديوهات الجديدة
-    delete_category_and_contents, move_videos_from_category, delete_category_by_id as delete_cat_record # دوال إدارة التصنيفات
+    move_video_to_category, get_video_by_id, delete_videos_by_ids,
+    delete_category_and_contents, move_videos_from_category, delete_category_by_id as delete_cat_record
 )
 from utils import extract_video_metadata, get_video_info
+# --- استيراد دالة التحديث ---
+from update_metadata import update_all_videos_metadata
 
 # تعريف المتغيرات العامة التي سيتم تمريرها من bot.py
 bot = None
@@ -61,28 +64,44 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                  keyboard.add(InlineKeyboardButton("🔙 رجوع للتصنيفات الرئيسية", callback_data="back_to_cats"))
         return keyboard
 
+    def format_duration(seconds):
+        if not seconds or not isinstance(seconds, (int, float)):
+            return ""
+        secs = int(seconds)
+        mins, secs = divmod(secs, 60)
+        hours, mins = divmod(mins, 60)
+        if hours > 0:
+            return f"{hours:02}:{mins:02}:{secs:02}"
+        return f"{mins:02}:{secs:02}"
+
+    def format_video_display_info(video):
+        metadata = video.get('metadata') or {}
+        series_name = metadata.get('series_name', video['caption'].split('\n')[0] if video['caption'] else "")
+        title = f"{video['id']}. {series_name.strip()}"
+        season = metadata.get('season')
+        episode = metadata.get('episode')
+        if season and episode:
+            title += f" - م{season} ح{episode}"
+        elif episode:
+            title += f" - ح{episode}"
+        info_parts = []
+        status = metadata.get('status')
+        if status: info_parts.append(status)
+        quality = metadata.get('quality_resolution')
+        if quality: info_parts.append(quality)
+        duration_str = format_duration(metadata.get('duration'))
+        if duration_str: info_parts.append(duration_str)
+        info_line = f" ({' | '.join(info_parts)})" if info_parts else ""
+        rating_text = f" ⭐ {video['avg_rating']:.1f}/5" if video.get('avg_rating', 0) > 0 else ""
+        views_text = f" 👁️ {video['view_count']}"
+        return f"{title}{info_line}{rating_text}{views_text}"
+
     def create_paginated_keyboard(videos, total_count, current_page, action_prefix, context_id):
         keyboard = InlineKeyboardMarkup(row_width=1)
         for video in videos:
-            video_info = video['metadata'] if video['metadata'] else {}
-            title = video['caption'].split('\n')[0] if video['caption'] else f"فيديو {video['id']}"
-            info_text = ""
-            if video_info:
-                duration = video_info.get("duration")
-                quality = video_info.get("quality_resolution")
-                if quality and duration:
-                    info_text = f" ({quality} | {duration})"
-                elif quality:
-                    info_text = f" ({quality})"
-                elif duration:
-                    secs = int(duration)
-                    mins = secs // 60
-                    hours = mins // 60
-                    info_text = f" ({hours:02}:{mins%60:02}:{secs%60:02})" if hours > 0 else f" ({mins:02}:{secs%60:02})"
-            rating_text = f" ⭐ {video['avg_rating']:.1f}/5" if video['avg_rating'] and video['avg_rating'] > 0 else ""
-            views_text = f" 👁️ {video['view_count']}"
+            display_title = format_video_display_info(video)
             keyboard.add(InlineKeyboardButton(
-                f"{video['id']}. {title}{info_text}{rating_text}{views_text}", 
+                display_title, 
                 callback_data=f"video::{video['id']}::{video['message_id']}::{video['chat_id']}"
             ))
         nav_buttons = []
@@ -96,62 +115,35 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
         keyboard.add(InlineKeyboardButton("🔙 رجوع للتصنيفات", callback_data="back_to_cats"))
         return keyboard
 
-    # --- دالة جديدة لعرض التصنيفات والفيديوهات معاً ---
     def create_combined_keyboard(child_categories, videos, total_video_count, current_page, parent_category_id):
         keyboard = InlineKeyboardMarkup()
-
-        # 1. إضافة التصنيفات الفرعية أولاً
         if child_categories:
             keyboard.add(InlineKeyboardButton("📂--- التصنيفات الفرعية ---📂", callback_data="noop"), row_width=1)
             cat_buttons = [InlineKeyboardButton(f"📁 {cat['name']}", callback_data=f"cat::{cat['id']}::0") for cat in child_categories]
             for i in range(0, len(cat_buttons), 2):
                 keyboard.add(*cat_buttons[i:i+2])
-        
-        # 2. إضافة الفيديوهات
         if videos:
             if child_categories:
                 keyboard.add(InlineKeyboardButton("🎬--- الفيديوهات ---🎬", callback_data="noop"), row_width=1)
-
             for video in videos:
-                video_info = video['metadata'] if video['metadata'] else {}
-                title = video['caption'].split('\n')[0] if video['caption'] else f"فيديو {video['id']}"
-                info_text = ""
-                if video_info:
-                    duration = video_info.get("duration")
-                    quality = video_info.get("quality_resolution")
-                    if quality and duration: info_text = f" ({quality} | {duration})"
-                    elif quality: info_text = f" ({quality})"
-                    elif duration:
-                        secs = int(duration)
-                        mins, secs = divmod(secs, 60)
-                        hours, mins = divmod(mins, 60)
-                        info_text = f" ({hours:02}:{mins:02}:{secs:02})" if hours > 0 else f" ({mins:02}:{secs:02})"
-                rating_text = f" ⭐ {video['avg_rating']:.1f}/5" if video['avg_rating'] and video['avg_rating'] > 0 else ""
-                views_text = f" 👁️ {video['view_count']}"
+                display_title = format_video_display_info(video)
                 keyboard.add(InlineKeyboardButton(
-                    f"{video['id']}. {title}{info_text}{rating_text}{views_text}",
+                    display_title,
                     callback_data=f"video::{video['id']}::{video['message_id']}::{video['chat_id']}"
                 ), row_width=1)
-        
-        # 3. إضافة أزرار التنقل للفيديوهات
         nav_buttons = []
         if current_page > 0:
             nav_buttons.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"cat::{parent_category_id}::{current_page - 1}"))
-        
         total_pages = math.ceil(total_video_count / VIDEOS_PER_PAGE) - 1
         if current_page < total_pages:
             nav_buttons.append(InlineKeyboardButton("التالي ➡️", callback_data=f"cat::{parent_category_id}::{current_page + 1}"))
-        
         if nav_buttons:
             keyboard.add(*nav_buttons, row_width=2)
-        
-        # 4. إضافة زر الرجوع
         parent_category = get_category_by_id(parent_category_id)
         if parent_category and parent_category.get('parent_id') is not None:
              keyboard.add(InlineKeyboardButton("🔙 رجوع", callback_data=f"cat::{parent_category['parent_id']}::0"), row_width=1)
         else:
              keyboard.add(InlineKeyboardButton("🔙 رجوع للتصنيفات الرئيسية", callback_data="back_to_cats"), row_width=1)
-
         return keyboard
 
     def create_video_action_keyboard(video_id, user_id):
@@ -253,6 +245,7 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
         btn_move_video = InlineKeyboardButton("➡️ نقل فيديو بالرقم", callback_data="admin::move_video_by_id")
         btn_delete_video = InlineKeyboardButton("❌ حذف فيديوهات بالأرقام", callback_data="admin::delete_videos_by_ids")
         btn_set_active = InlineKeyboardButton("🔘 تعيين التصنيف النشط", callback_data="admin::set_active")
+        btn_update_meta = InlineKeyboardButton("🔄 تحديث بيانات الفيديوهات القديمة", callback_data="admin::update_metadata")
         btn_add_channel = InlineKeyboardButton("➕ إضافة قناة اشتراك", callback_data="admin::add_channel")
         btn_remove_channel = InlineKeyboardButton("➖ إزالة قناة اشتراك", callback_data="admin::remove_channel")
         btn_list_channels = InlineKeyboardButton("📋 عرض القنوات", callback_data="admin::list_channels")
@@ -263,7 +256,7 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
         
         keyboard.add(btn_add_cat, btn_delete_cat)
         keyboard.add(btn_move_video, btn_delete_video)
-        keyboard.add(btn_set_active)
+        keyboard.add(btn_set_active, btn_update_meta)
         keyboard.add(btn_add_channel, btn_remove_channel)
         keyboard.add(btn_list_channels)
         keyboard.add(btn_broadcast, btn_stats, btn_subs, btn_help)
@@ -403,19 +396,17 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
             if not active_category_id:
                 logger.warning("No active category set. Video will not be saved.")
                 return
-            video_info_data = {}
+            metadata = extract_video_metadata(message.caption)
             if message.video:
-                video_info_data = {
-                    "duration": message.video.duration, "width": message.video.width,
-                    "height": message.video.height, "file_size": message.video.file_size,
-                    "quality_resolution": f"{message.video.height}p" if message.video.height else "N/A"
-                }
+                metadata['duration'] = message.video.duration
+                if 'quality_resolution' not in metadata:
+                    metadata['quality_resolution'] = f"{message.video.height}p" if message.video.height else "N/A"
             add_video(
                 message_id=message.message_id, caption=message.caption, chat_id=message.chat.id,
                 file_name=message.video.file_name if message.video else "", category_id=active_category_id,
-                file_id=message.video.file_id, video_info=video_info_data
+                file_id=message.video.file_id, video_info=metadata
             )
-            logger.info(f"Video {message.message_id} added to category {active_category_id}.")
+            logger.info(f"Video {message.message_id} added to category {active_category_id} with smart metadata.")
 
     # --- معالجات نقل وحذف الفيديوهات الجديدة (بالأرقام) ---
     def handle_delete_by_ids_input(message):
@@ -457,6 +448,16 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
             logger.error(f"Error in handle_move_by_id_input: {e}", exc_info=True)
             bot.reply_to(message, "حدث خطأ غير متوقع.")
 
+    # --- دالة تشغيل التحديث في الخلفية ---
+    def run_metadata_update(chat_id):
+        try:
+            bot.send_message(chat_id, "⏳ جارِ تحديث بيانات الفيديوهات القديمة... هذه العملية قد تستغرق بعض الوقت.")
+            updated_count, total_videos = update_all_videos_metadata()
+            bot.send_message(chat_id, f"✅ اكتمل التحديث بنجاح!\n\n- تم فحص ومعالجة: {total_videos} فيديو.\n- تم تحديث بيانات: {updated_count} فيديو.")
+        except Exception as e:
+            logger.error(f"Error during background metadata update: {e}", exc_info=True)
+            bot.send_message(chat_id, "❌ حدث خطأ أثناء محاولة تحديث البيانات.")
+
     # --- معالج ضغطات الأزرار الشامل ---
     @bot.callback_query_handler(func=lambda call: True)
     def callback_query(call):
@@ -468,7 +469,6 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                 sub_action = data[1]
                 bot.answer_callback_query(call.id)
                 
-                # --- قسم إدارة المحتوى ---
                 if sub_action == "add_new_cat":
                     keyboard = InlineKeyboardMarkup()
                     keyboard.add(InlineKeyboardButton("تصنيف رئيسي جديد", callback_data="admin::add_cat_main"))
@@ -561,7 +561,12 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                     category = get_category_by_id(int(new_category_id))
                     bot.edit_message_text(f"✅ تم نقل الفيديو بنجاح إلى تصنيف \"{category['name']}\".", call.message.chat.id, call.message.message_id)
                 
-                # --- قسم الإعدادات والبث والإحصائيات ---
+                elif sub_action == "update_metadata":
+                    # تشغيل دالة التحديث في thread منفصل
+                    update_thread = threading.Thread(target=run_metadata_update, args=(call.message.chat.id,))
+                    update_thread.start()
+                    bot.edit_message_text("تم إرسال طلب تحديث البيانات. ستصلك رسالة عند الانتهاء.", call.message.chat.id, call.message.message_id)
+
                 elif sub_action == "set_active":
                     categories = get_categories_tree()
                     if not categories:
