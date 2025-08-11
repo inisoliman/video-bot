@@ -23,12 +23,11 @@ from db_manager import (
     get_bot_stats, search_videos, add_required_channel, remove_required_channel,
     get_required_channels, admin_steps, user_last_search, VIDEOS_PER_PAGE, CALLBACK_DELIMITER,
     move_video_to_category, get_video_by_id, delete_videos_by_ids,
-    delete_category_and_contents, move_videos_from_category, delete_category_by_id as delete_cat_record,
-    get_db_connection # استيراد دالة الاتصال
+    delete_category_and_contents, move_videos_from_category, delete_category_by_id as delete_cat_record
 )
 from utils import extract_video_metadata, get_video_info
 # --- استيراد دالة التحديث ---
-from update_metadata import update_all_videos_metadata_generator
+from update_metadata import run_update_and_report_progress
 
 # تعريف المتغيرات العامة التي سيتم تمريرها من bot.py
 bot = None
@@ -459,39 +458,6 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
             logger.error(f"Error in handle_move_by_id_input: {e}", exc_info=True)
             bot.reply_to(message, "حدث خطأ غير متوقع.")
 
-    # --- دالة تشغيل التحديث في الخلفية ---
-    def run_metadata_update(chat_id, message_id):
-        conn = get_db_connection()
-        if not conn:
-            bot.edit_message_text("❌ فشل الاتصال بقاعدة البيانات.", chat_id, message_id)
-            return
-        
-        try:
-            last_edit_time = 0
-            for status, val1, val2 in update_all_videos_metadata_generator(conn):
-                if status == "progress":
-                    if time.time() - last_edit_time > 1.5: # تحديث كل 1.5 ثانية
-                        try:
-                            progress = (val1 / val2) * 100 if val2 > 0 else 0
-                            bot.edit_message_text(f"⏳ جارِ تحديث البيانات... ({val1}/{val2}) - {progress:.0f}%", chat_id, message_id)
-                            last_edit_time = time.time()
-                        except telebot.apihelper.ApiTelegramException as e:
-                            if 'message is not modified' in e.description:
-                                continue # تجاهل هذا الخطأ الشائع
-                            else:
-                                logger.error(f"Error editing progress message: {e}")
-                elif status == "done":
-                    updated_count, total_videos = val1, val2
-                    bot.edit_message_text(f"✅ اكتمل التحديث بنجاح!\n\n- تم فحص: {total_videos} فيديو.\n- تم تحديث: {updated_count} فيديو.", chat_id, message_id)
-                elif status == "error":
-                    bot.edit_message_text(f"❌ حدث خطأ أثناء التحديث: {val1}", chat_id, message_id)
-        except Exception as e:
-            logger.error(f"Error in run_metadata_update thread: {e}", exc_info=True)
-            bot.edit_message_text("❌ حدث خطأ فادح أثناء تشغيل التحديث.", chat_id, message_id)
-        finally:
-            if conn:
-                conn.close()
-
     # --- معالج ضغطات الأزرار الشامل ---
     @bot.callback_query_handler(func=lambda call: True)
     def callback_query(call):
@@ -597,7 +563,7 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                 
                 elif sub_action == "update_metadata":
                     msg = bot.edit_message_text("تم إرسال طلب تحديث البيانات...", call.message.chat.id, call.message.message_id)
-                    update_thread = threading.Thread(target=run_metadata_update, args=(msg.chat.id, msg.message_id))
+                    update_thread = threading.Thread(target=run_update_and_report_progress, args=(bot, msg.chat.id, msg.message_id))
                     update_thread.start()
 
                 elif sub_action == "set_active":
