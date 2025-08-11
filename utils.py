@@ -5,67 +5,91 @@ import logging
 # إعداد المسجل (logger) لهذا الملف
 logger = logging.getLogger(__name__)
 
+def arabic_word_to_int(word):
+    """يحول الكلمات العربية للأرقام إلى أعداد صحيحة."""
+    num_map = {
+        'الاول': 1, 'الأول': 1, 'الاولى': 1, 'الأولى': 1, 'واحد': 1,
+        'الثاني': 2, 'الثانية': 2, 'اثنين': 2,
+        'الثالث': 3, 'الثالثة': 3, 'ثلاثة': 3,
+        'الرابع': 4, 'الرابعة': 4, 'اربعة': 4,
+        'الخامس': 5, 'الخامسة': 5, 'خمسة': 5,
+        'السادس': 6, 'السادسة': 6, 'ستة': 6,
+        'السابع': 7, 'السابعة': 7, 'سبعة': 7,
+        'الثامن': 8, 'الثامنة': 8, 'ثمانية': 8,
+        'التاسع': 9, 'التاسعة': 9, 'تسعة': 9,
+        'العاشر': 10, 'العاشرة': 10, 'عشرة': 10,
+    }
+    return num_map.get(word)
+
 def extract_video_metadata(caption):
-    """استخلاص البيانات الوصفية من كابشن الفيديو."""
-    metadata = {"qualities": [], "is_translated": False, "is_dubbed": False}
+    """
+    محلل ذكي لاستخلاص البيانات الوصفية من كابشن الفيديو.
+    يستخلص اسم المسلسل، الموسم، الحلقة، والحالة (مترجم/مدبلج).
+    """
+    metadata = {}
     if not caption:
         return metadata
 
-    # استخلاص الجودات
-    quality_patterns = {
-        "1080p": [r"1080[pP]", r"FHD", r"Full\s*HD"],
-        "720p": [r"720[pP]", r"\bHD\b"],
-        "480p": [r"480[pP]", r"\bSD\b"]
-    }
-    
-    found_qualities = set()
-    for res, patterns in quality_patterns.items():
-        for pattern in patterns:
-            if re.search(pattern, caption, re.IGNORECASE):
-                found_qualities.add(res)
-    
-    # إضافة الجودات المكتشفة
-    for quality in found_qualities:
-        metadata["qualities"].append({"resolution": quality, "message_id": None})
+    # 1. استخلاص الموسم (Season)
+    season_match = re.search(r'(الموسم|season)\s+([a-zA-Z]+|\d+)', caption, re.IGNORECASE)
+    if season_match:
+        season_str = season_match.group(2)
+        if season_str.isdigit():
+            metadata['season'] = int(season_str)
+        else:
+            season_num = arabic_word_to_int(season_str)
+            if season_num:
+                metadata['season'] = season_num
 
-    # استخلاص حالة الترجمة/الدبلجة
-    if re.search(r"مترجم|sub|subbed|subtitle", caption, re.IGNORECASE):
-        metadata["is_translated"] = True
-    if re.search(r"مدبلج|dub|dubbed|arabic", caption, re.IGNORECASE):
-        metadata["is_dubbed"] = True
+    # 2. استخلاص الحلقة (Episode)
+    episode_match = re.search(r'(الحلقة|episode)\s+([a-zA-Z]+|\d+)', caption, re.IGNORECASE)
+    if episode_match:
+        episode_str = episode_match.group(2)
+        if episode_str.isdigit():
+            metadata['episode'] = int(episode_str)
+        else:
+            episode_num = arabic_word_to_int(episode_str)
+            if episode_num:
+                metadata['episode'] = episode_num
+    
+    # 3. استخلاص الحالة (مترجم/مدبلج)
+    if re.search(r'مترجم|sub|subbed|subtitle', caption, re.IGNORECASE):
+        metadata['status'] = 'مترجم'
+    elif re.search(r'مدبلج|dub|dubbed', caption, re.IGNORECASE):
+        metadata['status'] = 'مدبلج'
+
+    # 4. استخلاص اسم المسلسل (Series Name) - هذا الجزء تجريبي
+    # يبحث عن كلمة "مسلسل" ويأخذ الكلمة التي تليها كاسم محتمل
+    series_match = re.search(r'(مسلسل|series)\s+([a-zA-Z0-9_]+)', caption, re.IGNORECASE)
+    if series_match:
+        metadata['series_name'] = series_match.group(2).strip()
+    else:
+        # كحل بديل، نأخذ السطر الأول إذا لم نجد كلمة "مسلسل"
+        metadata['series_name'] = caption.split('\n')[0].strip()
+
+    # 5. استخلاص الجودة
+    quality_match = re.search(r'(\d{3,4})[pP]', caption)
+    if quality_match:
+        metadata['quality_resolution'] = f"{quality_match.group(1)}p"
 
     return metadata
+
 
 def get_video_info(file_path):
     """استخلاص معلومات الفيديو باستخدام MediaInfo."""
     try:
         media_info = MediaInfo.parse(file_path)
-        video_track = None
-        for track in media_info.tracks:
-            # --- هذا هو السطر الذي تم تصحيحه ---
-            if track.track_type == 'Video':
-                video_track = track
-                break
+        video_track = next((t for t in media_info.tracks if t.track_type == 'Video'), None)
         
         if video_track:
-            duration_ms = video_track.duration # in milliseconds
+            duration_ms = video_track.duration
             duration_seconds = duration_ms / 1000 if duration_ms else 0
             
-            # تنسيق المدة إلى H:MM:SS
-            hours = int(duration_seconds // 3600)
-            minutes = int((duration_seconds % 3600) // 60)
-            seconds = int(duration_seconds % 60)
-            formatted_duration = f"{hours:02d}:{minutes:02d}:{seconds:02d}" if hours > 0 else f"{minutes:02d}:{seconds:02d}"
-
             return {
-                "duration": formatted_duration,
+                "duration": duration_seconds, # نرجع الثواني ليتم تنسيقها لاحقاً
                 "width": video_track.width,
                 "height": video_track.height,
-                "file_size": video_track.file_size, # in bytes
-                "codec": video_track.codec,
-                "frame_rate": video_track.frame_rate,
-                "overall_bit_rate": video_track.overall_bit_rate,
-                "display_aspect_ratio": video_track.display_aspect_ratio,
+                "file_size": video_track.file_size,
                 "quality_resolution": f"{video_track.height}p" if video_track.height else "N/A"
             }
         return None
