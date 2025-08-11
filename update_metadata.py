@@ -20,24 +20,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- إعدادات قاعدة البيانات (منسوخة من db_manager.py) ---
-try:
-    DATABASE_URL = os.environ.get('DATABASE_URL')
-    if not DATABASE_URL:
-        raise ValueError("DATABASE_URL environment variable not set.")
-        
-    result = urlparse(DATABASE_URL)
-    DB_CONFIG = {
-        'user': result.username,
-        'password': result.password,
-        'host': result.hostname,
-        'port': result.port,
-        'dbname': result.path[1:]
-    }
-except Exception as e:
-    logger.critical(f"FATAL: Could not parse DATABASE_URL. Error: {e}")
-    exit()
-
 # --- المحلل الذكي (منسوخ من utils.py) ---
 def arabic_word_to_int(word):
     num_map = {
@@ -59,7 +41,7 @@ def extract_video_metadata(caption):
     if not caption:
         return metadata
 
-    season_match = re.search(r'(الموسم|season)\s+([a-zA-Z]+|\d+)', caption, re.IGNORECASE)
+    season_match = re.search(r'\b(الموسم|season)\s+([a-zA-Z]+|\d+)\b', caption, re.IGNORECASE)
     if season_match:
         season_str = season_match.group(2)
         if season_str.isdigit():
@@ -69,7 +51,7 @@ def extract_video_metadata(caption):
             if season_num:
                 metadata['season'] = season_num
 
-    episode_match = re.search(r'(الحلقة|episode)\s+([a-zA-Z]+|\d+)', caption, re.IGNORECASE)
+    episode_match = re.search(r'\b(الحلقة|episode)\s+([a-zA-Z]+|\d+)\b', caption, re.IGNORECASE)
     if episode_match:
         episode_str = episode_match.group(2)
         if episode_str.isdigit():
@@ -87,8 +69,6 @@ def extract_video_metadata(caption):
     series_match = re.search(r'(مسلسل|series)\s+([a-zA-Z0-9_]+)', caption, re.IGNORECASE)
     if series_match:
         metadata['series_name'] = series_match.group(2).strip()
-    else:
-        metadata['series_name'] = caption.split('\n')[0].strip()
 
     quality_match = re.search(r'(\d{3,4})[pP]', caption)
     if quality_match:
@@ -96,60 +76,46 @@ def extract_video_metadata(caption):
 
     return metadata
 
-# --- دالة التحديث الرئيسية ---
-def update_all_videos_metadata():
+# --- دالة التحديث الرئيسية (المعدلة لتعمل كمولد Generator) ---
+def update_all_videos_metadata_generator(conn):
     """
-    تجلب كل الفيديوهات من قاعدة البيانات، تعيد تحليل الكابشن،
-    وتحدث حقل البيانات الوصفية (metadata).
+    تجلب كل الفيديوهات، تعيد تحليل الكابشن، وتحدث البيانات،
+    مع إرسال تحديثات عن التقدم.
     """
-    conn = None
     updated_count = 0
     total_videos = 0
     try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        c = conn.cursor(cursor_factory=DictCursor)
-        
-        logger.info("Fetching all videos from the database...")
-        c.execute("SELECT id, caption, metadata FROM video_archive")
-        videos = c.fetchall()
-        total_videos = len(videos)
-        
-        if not videos:
-            logger.info("No videos found in the database. Nothing to do.")
-            return 0, 0
-
-        logger.info(f"Found {total_videos} videos. Starting metadata update process...")
-        
-        for video in videos:
-            if not video['caption']:
-                continue
-
-            new_metadata = extract_video_metadata(video['caption'])
-            old_metadata = video['metadata'] if video['metadata'] else {}
-            final_metadata = {**old_metadata, **new_metadata}
-            metadata_json = json.dumps(final_metadata)
+        with conn.cursor(cursor_factory=DictCursor) as c:
+            c.execute("SELECT id, caption, metadata FROM video_archive")
+            videos = c.fetchall()
+            total_videos = len(videos)
             
-            c.execute("UPDATE video_archive SET metadata = %s WHERE id = %s", (metadata_json, video['id']))
-            updated_count += 1
-            
-            if updated_count % 100 == 0:
-                logger.info(f"Processed {updated_count}/{total_videos} videos...")
+            if not videos:
+                yield "done", 0, 0
+                return
 
-        conn.commit()
-        logger.info(f"✅ Successfully updated metadata for {updated_count} videos!")
-        return updated_count, total_videos
+            for i, video in enumerate(videos):
+                if not video['caption']:
+                    continue
+
+                new_metadata = extract_video_metadata(video['caption'])
+                old_metadata = video['metadata'] if video['metadata'] else {}
+                final_metadata = {**old_metadata, **new_metadata}
+
+                if final_metadata != old_metadata:
+                    metadata_json = json.dumps(final_metadata)
+                    c.execute("UPDATE video_archive SET metadata = %s WHERE id = %s", (metadata_json, video['id']))
+                    updated_count += 1
+                
+                # إرسال تحديث عن التقدم كل 50 فيديو
+                if (i + 1) % 50 == 0 or (i + 1) == total_videos:
+                    yield "progress", (i + 1), total_videos
+
+            conn.commit()
+            yield "done", updated_count, total_videos
 
     except Exception as e:
         logger.error(f"An error occurred during the update process: {e}", exc_info=True)
         if conn:
             conn.rollback()
-        return updated_count, total_videos
-    finally:
-        if conn:
-            conn.close()
-
-# --- نقطة انطلاق السكربت (للتشغيل اليدوي فقط) ---
-if __name__ == "__main__":
-    logger.info("Starting the one-time metadata update script manually.")
-    count, total = update_all_videos_metadata()
-    logger.info(f"Script finished. Updated {count}/{total} videos.")
+        yield "error", str(e), None
