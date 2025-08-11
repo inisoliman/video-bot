@@ -22,7 +22,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- إعدادات قاعدة البيانات (منسوخة من db_manager.py) ---
+# --- إعدادات قاعدة البيانات (مستقلة لضمان العمل) ---
 def get_db_connection():
     try:
         DATABASE_URL = os.environ.get('DATABASE_URL')
@@ -43,7 +43,7 @@ def get_db_connection():
         logger.error(f"Database connection failed: {e}")
         return None
 
-# --- المحلل الذكي (منسوخ من utils.py) ---
+# --- المحلل الذكي (منسوخ من utils.py لضمان الدقة) ---
 def arabic_word_to_int(word):
     num_map = {
         'الاول': 1, 'الأول': 1, 'الاولى': 1, 'الأولى': 1, 'واحد': 1,
@@ -128,7 +128,6 @@ def run_update_and_report_progress(bot, chat_id, message_id):
                 new_metadata = extract_video_metadata(video['caption'])
                 old_metadata = video['metadata'] if video['metadata'] else {}
                 
-                # دمج البيانات مع الحفاظ على مدة الفيديو إن وجدت
                 final_metadata = old_metadata.copy()
                 final_metadata.update(new_metadata)
 
@@ -137,7 +136,6 @@ def run_update_and_report_progress(bot, chat_id, message_id):
                     c.execute("UPDATE video_archive SET metadata = %s WHERE id = %s", (metadata_json, video['id']))
                     updated_count += 1
                 
-                # تحديث الرسالة بشكل دوري
                 if time.time() - last_edit_time > 1.5 or (i + 1) == total_videos:
                     try:
                         progress = ((i + 1) / total_videos) * 100
@@ -163,6 +161,4 @@ def run_update_and_report_progress(bot, chat_id, message_id):
 
 # --- نقطة انطلاق السكربت (للتشغيل اليدوي فقط) ---
 if __name__ == "__main__":
-    # هذا الجزء لن يعمل بدون كائن البوت، وهو مخصص للاختبار المحلي فقط
     logger.info("This script is intended to be called from the main bot.")
-    logger.info("To run manually, you would need to provide a mock bot object.")
