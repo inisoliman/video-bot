@@ -23,11 +23,12 @@ from db_manager import (
     get_bot_stats, search_videos, add_required_channel, remove_required_channel,
     get_required_channels, admin_steps, user_last_search, VIDEOS_PER_PAGE, CALLBACK_DELIMITER,
     move_video_to_category, get_video_by_id, delete_videos_by_ids,
-    delete_category_and_contents, move_videos_from_category, delete_category_by_id as delete_cat_record
+    delete_category_and_contents, move_videos_from_category, delete_category_by_id as delete_cat_record,
+    get_db_connection # استيراد دالة الاتصال
 )
 from utils import extract_video_metadata, get_video_info
 # --- استيراد دالة التحديث ---
-from update_metadata import update_all_videos_metadata
+from update_metadata import update_all_videos_metadata_generator
 
 # تعريف المتغيرات العامة التي سيتم تمريرها من bot.py
 bot = None
@@ -78,26 +79,20 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
         """إنشاء عنوان عرض غني بالمعلومات للفيديو مع سلوك احتياطي ذكي."""
         metadata = video.get('metadata') or {}
         
-        # محاولة بناء العنوان الذكي
         series_name = metadata.get('series_name')
         season = metadata.get('season')
         episode = metadata.get('episode')
 
-        # إذا وجدنا اسم مسلسل (من كلمة "مسلسل") ومعه حلقة أو موسم، نبني العنوان الذكي
         if series_name and (season or episode):
             title_base = series_name.strip()
             season_episode_part = []
-            if season:
-                season_episode_part.append(f"م{season}")
-            if episode:
-                season_episode_part.append(f"ح{episode}")
+            if season: season_episode_part.append(f"م{season}")
+            if episode: season_episode_part.append(f"ح{episode}")
             title = f"{video['id']}. {title_base} - {' '.join(season_episode_part)}"
         else:
-            # السلوك الاحتياطي: استخدام السطر الأول من الكابشن كعنوان رئيسي
             fallback_title = video['caption'].split('\n')[0] if video['caption'] else ""
             title = f"{video['id']}. {fallback_title.strip()}"
 
-        # بناء سطر المعلومات (الجودة، المدة، الحالة)
         info_parts = []
         status = metadata.get('status')
         if status: info_parts.append(status)
@@ -107,7 +102,6 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
         if duration_str: info_parts.append(duration_str)
         info_line = f" ({' | '.join(info_parts)})" if info_parts else ""
         
-        # بناء سطر التقييم والمشاهدات
         rating_text = f" ⭐ {video['avg_rating']:.1f}/5" if video.get('avg_rating', 0) > 0 else ""
         views_text = f" 👁️ {video['view_count']}"
         
@@ -466,14 +460,37 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
             bot.reply_to(message, "حدث خطأ غير متوقع.")
 
     # --- دالة تشغيل التحديث في الخلفية ---
-    def run_metadata_update(chat_id):
+    def run_metadata_update(chat_id, message_id):
+        conn = get_db_connection()
+        if not conn:
+            bot.edit_message_text("❌ فشل الاتصال بقاعدة البيانات.", chat_id, message_id)
+            return
+        
         try:
-            bot.send_message(chat_id, "⏳ جارِ تحديث بيانات الفيديوهات القديمة... هذه العملية قد تستغرق بعض الوقت.")
-            updated_count, total_videos = update_all_videos_metadata()
-            bot.send_message(chat_id, f"✅ اكتمل التحديث بنجاح!\n\n- تم فحص ومعالجة: {total_videos} فيديو.\n- تم تحديث بيانات: {updated_count} فيديو.")
+            last_edit_time = 0
+            for status, val1, val2 in update_all_videos_metadata_generator(conn):
+                if status == "progress":
+                    if time.time() - last_edit_time > 1.5: # تحديث كل 1.5 ثانية
+                        try:
+                            progress = (val1 / val2) * 100 if val2 > 0 else 0
+                            bot.edit_message_text(f"⏳ جارِ تحديث البيانات... ({val1}/{val2}) - {progress:.0f}%", chat_id, message_id)
+                            last_edit_time = time.time()
+                        except telebot.apihelper.ApiTelegramException as e:
+                            if 'message is not modified' in e.description:
+                                continue # تجاهل هذا الخطأ الشائع
+                            else:
+                                logger.error(f"Error editing progress message: {e}")
+                elif status == "done":
+                    updated_count, total_videos = val1, val2
+                    bot.edit_message_text(f"✅ اكتمل التحديث بنجاح!\n\n- تم فحص: {total_videos} فيديو.\n- تم تحديث: {updated_count} فيديو.", chat_id, message_id)
+                elif status == "error":
+                    bot.edit_message_text(f"❌ حدث خطأ أثناء التحديث: {val1}", chat_id, message_id)
         except Exception as e:
-            logger.error(f"Error during background metadata update: {e}", exc_info=True)
-            bot.send_message(chat_id, "❌ حدث خطأ أثناء محاولة تحديث البيانات.")
+            logger.error(f"Error in run_metadata_update thread: {e}", exc_info=True)
+            bot.edit_message_text("❌ حدث خطأ فادح أثناء تشغيل التحديث.", chat_id, message_id)
+        finally:
+            if conn:
+                conn.close()
 
     # --- معالج ضغطات الأزرار الشامل ---
     @bot.callback_query_handler(func=lambda call: True)
@@ -579,10 +596,9 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
                     bot.edit_message_text(f"✅ تم نقل الفيديو بنجاح إلى تصنيف \"{category['name']}\".", call.message.chat.id, call.message.message_id)
                 
                 elif sub_action == "update_metadata":
-                    # تشغيل دالة التحديث في thread منفصل
-                    update_thread = threading.Thread(target=run_metadata_update, args=(call.message.chat.id,))
+                    msg = bot.edit_message_text("تم إرسال طلب تحديث البيانات...", call.message.chat.id, call.message.message_id)
+                    update_thread = threading.Thread(target=run_metadata_update, args=(msg.chat.id, msg.message_id))
                     update_thread.start()
-                    bot.edit_message_text("تم إرسال طلب تحديث البيانات. ستصلك رسالة عند الانتهاء.", call.message.chat.id, call.message.message_id)
 
                 elif sub_action == "set_active":
                     categories = get_categories_tree()
