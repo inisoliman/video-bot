@@ -30,8 +30,8 @@ def extract_video_metadata(caption):
     if not caption:
         return metadata
 
-    # 1. استخلاص الموسم (Season)
-    season_match = re.search(r'(الموسم|season)\s+([a-zA-Z]+|\d+)', caption, re.IGNORECASE)
+    # 1. استخلاص الموسم (Season) - نجعله أكثر دقة
+    season_match = re.search(r'\b(الموسم|season)\s+([a-zA-Z]+|\d+)\b', caption, re.IGNORECASE)
     if season_match:
         season_str = season_match.group(2)
         if season_str.isdigit():
@@ -41,8 +41,9 @@ def extract_video_metadata(caption):
             if season_num:
                 metadata['season'] = season_num
 
-    # 2. استخلاص الحلقة (Episode)
-    episode_match = re.search(r'(الحلقة|episode)\s+([a-zA-Z]+|\d+)', caption, re.IGNORECASE)
+    # 2. استخلاص الحلقة (Episode) - نجعله أكثر دقة
+    # The \b ensures we don't match "720" from "720p"
+    episode_match = re.search(r'\b(الحلقة|episode)\s+([a-zA-Z]+|\d+)\b', caption, re.IGNORECASE)
     if episode_match:
         episode_str = episode_match.group(2)
         if episode_str.isdigit():
@@ -58,14 +59,10 @@ def extract_video_metadata(caption):
     elif re.search(r'مدبلج|dub|dubbed', caption, re.IGNORECASE):
         metadata['status'] = 'مدبلج'
 
-    # 4. استخلاص اسم المسلسل (Series Name) - هذا الجزء تجريبي
-    # يبحث عن كلمة "مسلسل" ويأخذ الكلمة التي تليها كاسم محتمل
+    # 4. استخلاص اسم المسلسل (Series Name) - فقط إذا وجدت كلمة "مسلسل"
     series_match = re.search(r'(مسلسل|series)\s+([a-zA-Z0-9_]+)', caption, re.IGNORECASE)
     if series_match:
         metadata['series_name'] = series_match.group(2).strip()
-    else:
-        # كحل بديل، نأخذ السطر الأول إذا لم نجد كلمة "مسلسل"
-        metadata['series_name'] = caption.split('\n')[0].strip()
 
     # 5. استخلاص الجودة
     quality_match = re.search(r'(\d{3,4})[pP]', caption)
