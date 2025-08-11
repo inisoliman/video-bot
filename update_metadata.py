@@ -11,14 +11,37 @@ from urllib.parse import urlparse
 import logging
 import re
 import json
+import time
+import telebot
 
 # --- إعداد نظام التسجيل (Logging) ---
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
+
+# --- إعدادات قاعدة البيانات (منسوخة من db_manager.py) ---
+def get_db_connection():
+    try:
+        DATABASE_URL = os.environ.get('DATABASE_URL')
+        if not DATABASE_URL:
+            raise ValueError("DATABASE_URL environment variable not set.")
+            
+        result = urlparse(DATABASE_URL)
+        DB_CONFIG = {
+            'user': result.username,
+            'password': result.password,
+            'host': result.hostname,
+            'port': result.port,
+            'dbname': result.path[1:]
+        }
+        conn = psycopg2.connect(**DB_CONFIG)
+        return conn
+    except Exception as e:
+        logger.error(f"Database connection failed: {e}")
+        return None
 
 # --- المحلل الذكي (منسوخ من utils.py) ---
 def arabic_word_to_int(word):
@@ -76,22 +99,26 @@ def extract_video_metadata(caption):
 
     return metadata
 
-# --- دالة التحديث الرئيسية (المعدلة لتعمل كمولد Generator) ---
-def update_all_videos_metadata_generator(conn):
-    """
-    تجلب كل الفيديوهات، تعيد تحليل الكابشن، وتحدث البيانات،
-    مع إرسال تحديثات عن التقدم.
-    """
+# --- دالة التحديث الرئيسية ---
+def run_update_and_report_progress(bot, chat_id, message_id):
+    conn = get_db_connection()
+    if not conn:
+        bot.edit_message_text("❌ فشل الاتصال بقاعدة البيانات.", chat_id, message_id)
+        return
+
     updated_count = 0
     total_videos = 0
+    last_edit_time = 0
+    
     try:
         with conn.cursor(cursor_factory=DictCursor) as c:
+            logger.info("Fetching all videos from the database...")
             c.execute("SELECT id, caption, metadata FROM video_archive")
             videos = c.fetchall()
             total_videos = len(videos)
             
             if not videos:
-                yield "done", 0, 0
+                bot.edit_message_text("✅ لا توجد فيديوهات في قاعدة البيانات لتحديثها.", chat_id, message_id)
                 return
 
             for i, video in enumerate(videos):
@@ -100,22 +127,42 @@ def update_all_videos_metadata_generator(conn):
 
                 new_metadata = extract_video_metadata(video['caption'])
                 old_metadata = video['metadata'] if video['metadata'] else {}
-                final_metadata = {**old_metadata, **new_metadata}
+                
+                # دمج البيانات مع الحفاظ على مدة الفيديو إن وجدت
+                final_metadata = old_metadata.copy()
+                final_metadata.update(new_metadata)
 
                 if final_metadata != old_metadata:
                     metadata_json = json.dumps(final_metadata)
                     c.execute("UPDATE video_archive SET metadata = %s WHERE id = %s", (metadata_json, video['id']))
                     updated_count += 1
                 
-                # إرسال تحديث عن التقدم كل 50 فيديو
-                if (i + 1) % 50 == 0 or (i + 1) == total_videos:
-                    yield "progress", (i + 1), total_videos
-
+                # تحديث الرسالة بشكل دوري
+                if time.time() - last_edit_time > 1.5 or (i + 1) == total_videos:
+                    try:
+                        progress = ((i + 1) / total_videos) * 100
+                        bot.edit_message_text(f"⏳ جارِ تحديث البيانات... ({i + 1}/{total_videos}) - {progress:.0f}%", chat_id, message_id)
+                        last_edit_time = time.time()
+                    except telebot.apihelper.ApiTelegramException as e:
+                        if 'message is not modified' in e.description:
+                            continue
+                        else:
+                            logger.error(f"Error editing progress message: {e}")
+            
             conn.commit()
-            yield "done", updated_count, total_videos
+            bot.edit_message_text(f"✅ اكتمل التحديث بنجاح!\n\n- تم فحص: {total_videos} فيديو.\n- تم تحديث بيانات: {updated_count} فيديو.", chat_id, message_id)
 
     except Exception as e:
         logger.error(f"An error occurred during the update process: {e}", exc_info=True)
         if conn:
             conn.rollback()
-        yield "error", str(e), None
+        bot.edit_message_text(f"❌ حدث خطأ أثناء التحديث: {e}", chat_id, message_id)
+    finally:
+        if conn:
+            conn.close()
+
+# --- نقطة انطلاق السكربت (للتشغيل اليدوي فقط) ---
+if __name__ == "__main__":
+    # هذا الجزء لن يعمل بدون كائن البوت، وهو مخصص للاختبار المحلي فقط
+    logger.info("This script is intended to be called from the main bot.")
+    logger.info("To run manually, you would need to provide a mock bot object.")
