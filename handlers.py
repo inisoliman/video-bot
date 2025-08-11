@@ -430,8 +430,9 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
     # --- معالجات نقل وحذف الفيديوهات (تتم عبر إعادة التوجيه) ---
     def handle_forwarded_video_to_move(message):
         if check_cancel(message): return
-        if not message.forward_from_chat or not message.forward_from_message_id:
-            msg = bot.reply_to(message, "خطأ. يرجى إعادة توجيه الفيديو من القناة. (أو /cancel)")
+        # --- التصحيح هنا ---
+        if not message.forward_from_message_id:
+            msg = bot.reply_to(message, "خطأ. يرجى إعادة توجيه الرسالة. (أو /cancel)")
             bot.register_next_step_handler(msg, handle_forwarded_video_to_move)
             return
         video = get_video_by_message_id(message.forward_from_message_id)
@@ -450,8 +451,9 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
 
     def handle_forwarded_video_to_delete(message):
         if check_cancel(message): return
-        if not message.forward_from_chat or not message.forward_from_message_id:
-            msg = bot.reply_to(message, "خطأ. يرجى إعادة توجيه الفيديو من القناة. (أو /cancel)")
+        # --- التصحيح هنا ---
+        if not message.forward_from_message_id:
+            msg = bot.reply_to(message, "خطأ. يرجى إعادة توجيه الرسالة. (أو /cancel)")
             bot.register_next_step_handler(msg, handle_forwarded_video_to_delete)
             return
         video = get_video_by_message_id(message.forward_from_message_id)
