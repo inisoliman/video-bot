@@ -75,15 +75,29 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
         return f"{mins:02}:{secs:02}"
 
     def format_video_display_info(video):
+        """إنشاء عنوان عرض غني بالمعلومات للفيديو مع سلوك احتياطي ذكي."""
         metadata = video.get('metadata') or {}
-        series_name = metadata.get('series_name', video['caption'].split('\n')[0] if video['caption'] else "")
-        title = f"{video['id']}. {series_name.strip()}"
+        
+        # محاولة بناء العنوان الذكي
+        series_name = metadata.get('series_name')
         season = metadata.get('season')
         episode = metadata.get('episode')
-        if season and episode:
-            title += f" - م{season} ح{episode}"
-        elif episode:
-            title += f" - ح{episode}"
+
+        # إذا وجدنا اسم مسلسل (من كلمة "مسلسل") ومعه حلقة أو موسم، نبني العنوان الذكي
+        if series_name and (season or episode):
+            title_base = series_name.strip()
+            season_episode_part = []
+            if season:
+                season_episode_part.append(f"م{season}")
+            if episode:
+                season_episode_part.append(f"ح{episode}")
+            title = f"{video['id']}. {title_base} - {' '.join(season_episode_part)}"
+        else:
+            # السلوك الاحتياطي: استخدام السطر الأول من الكابشن كعنوان رئيسي
+            fallback_title = video['caption'].split('\n')[0] if video['caption'] else ""
+            title = f"{video['id']}. {fallback_title.strip()}"
+
+        # بناء سطر المعلومات (الجودة، المدة، الحالة)
         info_parts = []
         status = metadata.get('status')
         if status: info_parts.append(status)
@@ -92,8 +106,11 @@ def register_handlers(telebot_instance, channel_id, admin_ids):
         duration_str = format_duration(metadata.get('duration'))
         if duration_str: info_parts.append(duration_str)
         info_line = f" ({' | '.join(info_parts)})" if info_parts else ""
+        
+        # بناء سطر التقييم والمشاهدات
         rating_text = f" ⭐ {video['avg_rating']:.1f}/5" if video.get('avg_rating', 0) > 0 else ""
         views_text = f" 👁️ {video['view_count']}"
+        
         return f"{title}{info_line}{rating_text}{views_text}"
 
     def create_paginated_keyboard(videos, total_count, current_page, action_prefix, context_id):
