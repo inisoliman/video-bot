@@ -413,17 +413,36 @@ def get_required_channels():
 
 # --- دوال إدارة الفيديوهات والتصنيفات (الجديدة والمعدلة) ---
 
+def get_video_by_id(video_id):
+    """يجلب فيديو باستخدام مفتاحه الأساسي (id)."""
+    return execute_query("SELECT * FROM video_archive WHERE id = %s", (video_id,), fetch="one")
+
 def move_video_to_category(video_id, new_category_id):
     """ينقل فيديو إلى تصنيف آخر."""
     query = "UPDATE video_archive SET category_id = %s WHERE id = %s"
     execute_query(query, (new_category_id, video_id))
     return True
 
-def delete_video_by_id(video_id):
-    """يحذف فيديو من قاعدة البيانات."""
-    query = "DELETE FROM video_archive WHERE id = %s"
-    execute_query(query, (video_id,))
-    return True
+def delete_videos_by_ids(video_ids):
+    """يحذف قائمة من الفيديوهات باستخدام معرفاتهم."""
+    if not video_ids:
+        return 0
+    
+    conn = get_db_connection()
+    if not conn: return 0
+    deleted_count = 0
+    try:
+        with conn.cursor() as c:
+            # نستخدم ANY(array) لأنها الطريقة الفعالة للتعامل مع قائمة
+            c.execute("DELETE FROM video_archive WHERE id = ANY(%s)", (video_ids,))
+            deleted_count = c.rowcount
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Database query failed for bulk delete. Error: {e}", exc_info=True)
+        if conn: conn.rollback()
+    finally:
+        if conn: conn.close()
+    return deleted_count
 
 def delete_category_and_contents(category_id):
     """يحذف كل الفيديوهات داخل تصنيف معين ثم يحذف التصنيف نفسه."""
