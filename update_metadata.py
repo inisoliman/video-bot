@@ -74,13 +74,16 @@ def extract_video_metadata(caption):
             if season_num:
                 metadata['season'] = season_num
 
-    episode_match = re.search(r'\b(الحلقة|episode)\s+([a-zA-Z]+|\d+)\b', caption, re.IGNORECASE)
+    episode_match = re.search(r'\b(الحلقة|episode)\s+(\d+)(?!p|P)\b', caption, re.IGNORECASE)
     if episode_match:
         episode_str = episode_match.group(2)
         if episode_str.isdigit():
             metadata['episode'] = int(episode_str)
-        else:
-            episode_num = arabic_word_to_int(episode_str)
+    else:
+        # Check for Arabic word form
+        episode_word_match = re.search(r'\b(الحلقة|episode)\s+([a-zA-Z]+)\b', caption, re.IGNORECASE)
+        if episode_word_match:
+            episode_num = arabic_word_to_int(episode_word_match.group(2))
             if episode_num:
                 metadata['episode'] = episode_num
     
